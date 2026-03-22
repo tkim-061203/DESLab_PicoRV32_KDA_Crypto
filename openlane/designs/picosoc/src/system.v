@@ -330,9 +330,9 @@ module system (
         .clk1(clk), .csb1(1'b1), .addr1(10'b0), .dout1()
     );
 
-    // App SRAM  16 KB
+    // App SRAM  16 KB  (4 × 4 kB banks via wrapper)
     wire [31:0] app_sram_dout;
-    sky130_sram_16kbyte_1rw1r_32x4096_8 u_app_sram (
+    sram_16kb_wrapper u_app_sram (
         `ifdef USE_POWER_PINS .vccd1(VPWR), .vssd1(VGND), `endif
         .clk0(clk), .csb0(!(mem_la_addr[31:16] == 16'h0001 && mem_la_addr[15:14] == 2'b00)),
         .web0(!mem_la_write), .wmask0(mem_la_wstrb), .addr0(mem_la_addr[13:2]), .din0(mem_la_wdata), .dout0(app_sram_dout),

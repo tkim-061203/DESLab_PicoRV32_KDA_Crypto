@@ -127,12 +127,12 @@ let
   buildInputs = with pkgs;
     # these are generally useful packages for tests, verification, synthesis
     # and deployment, etc
-    [ python3 gcc
-      yosys symbiyosys nextpnr arachne-pnr icestorm
+    [ gcc
+      yosys sby nextpnr arachne-pnr icestorm
       z3 boolector yices
-      verilog verilator
+      iverilog verilator
       # also include the RISC-V toolchain
-      riscv-toolchain
+      # riscv-toolchain
     ];
 
 # Export a usable shell environment

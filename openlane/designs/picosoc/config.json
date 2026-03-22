@@ -6,7 +6,7 @@
         "dir::src/simpleuart.v",
         "dir::src/simple_spi_master.v",
         "dir::src/sky130_sram_4kbyte_1rw1r_32x1024_8_stub.v",
-        "dir::src/sky130_sram_16kbyte_1rw1r_32x4096_8_stub.v",
+        "dir::src/sram_16kb_wrapper.v",
         "dir::src/tinyjambu_core_stub.v",
         "dir::src/xoodyakcore_stub.v",
         "dir::src/cofb_core_stub.v"
@@ -15,45 +15,79 @@
     "CLOCK_PORT": "clk",
     "CLOCK_NET": "clk",
     "FP_SIZING": "absolute",
-    "DIE_AREA": "0 0 2500 2500",
-    "FP_CORE_UTIL": 35,
+    "DIE_AREA": "0 0 4000 4000",
+    "FP_CORE_UTIL": 15,
     "ERROR_ON_LINTER_ERRORS": false,
     "SYNTH_STRATEGY": "AREA 0",
-    "MAX_THREADS": 2,
+    "PL_TARGET_DENSITY": 0.15,
+    "PL_MACRO_HALO": "200 200",
+    "GRT_OVERFLOW_ITERS": 200,
+    "GRT_ALLOW_CONGESTION": true,
+    "RT_MAX_LAYER": "met5",
+
     "MACROS": {
         "tinyjambu_core": {
             "gds": "dir::macros/tinyjambu_core.gds",
-            "lef": "dir::macros/tinyjambu_core.lef"
+            "lef": "dir::macros/tinyjambu_core.lef",
+            "instances": {
+                "u_jambu": {
+                    "location": [2100, 2700],
+                    "orientation": "N"
+                }
+            }
         },
         "xoodyakcore": {
             "gds": "dir::macros/xoodyakcore.gds",
-            "lef": "dir::macros/xoodyakcore.lef"
+            "lef": "dir::macros/xoodyakcore.lef",
+            "instances": {
+                "u_xoodyak": {
+                    "location": [2100, 1000],
+                    "orientation": "N"
+                }
+            }
         },
         "cofb_core": {
             "gds": "dir::macros/cofb_core.gds",
-            "lef": "dir::macros/cofb_core.lef"
+            "lef": "dir::macros/cofb_core.lef",
+            "instances": {
+                "u_giftcofb": {
+                    "location": [2100, 50],
+                    "orientation": "N"
+                }
+            }
         },
         "sky130_sram_4kbyte_1rw1r_32x1024_8": {
             "gds": "dir::macros/sky130_sram_4kbyte_1rw1r_32x1024_8.gds",
-            "lef": "dir::macros/sky130_sram_4kbyte_1rw1r_32x1024_8.lef"
-        },
-        "sky130_sram_16kbyte_1rw1r_32x4096_8": {
-            "gds": "dir::macros/sky130_sram_16kbyte_1rw1r_32x4096_8.gds",
-            "lef": "dir::macros/sky130_sram_16kbyte_1rw1r_32x4096_8.lef"
+            "lef": "dir::macros/sky130_sram_4kbyte_1rw1r_32x1024_8.lef",
+            "instances": {
+                "u_boot_sram": {
+                    "location": [50, 50],
+                    "orientation": "N"
+                },
+                "u_app_sram.gen_bank[0].u_bank": {
+                    "location": [50, 900],
+                    "orientation": "N"
+                },
+                "u_app_sram.gen_bank[1].u_bank": {
+                    "location": [50, 1700],
+                    "orientation": "N"
+                },
+                "u_app_sram.gen_bank[2].u_bank": {
+                    "location": [1000, 900],
+                    "orientation": "N"
+                },
+                "u_app_sram.gen_bank[3].u_bank": {
+                    "location": [1000, 1700],
+                    "orientation": "N"
+                }
+            }
         }
     },
-    "MACRO_PLACEMENT": {
-        "u_boot_sram": "50 50 N",
-        "u_app_sram": "50 800 N",
-        "u_jambu": "50 1800 N",
-        "u_xoodyak": "850 1650 N",
-        "u_giftcofb": "1650 1650 N"
-    },
-    "FP_PDN_MACRO_HOOKS": [
+    "PDN_MACRO_CONNECTIONS": [
         "u_jambu VPWR VGND VPWR VGND",
         "u_xoodyak VPWR VGND VPWR VGND",
         "u_giftcofb VPWR VGND VPWR VGND",
         "u_boot_sram vccd1 vssd1 VPWR VGND",
-        "u_app_sram vccd1 vssd1 VPWR VGND"
+        "u_app_sram.*u_bank vccd1 vssd1 VPWR VGND"
     ]
 }

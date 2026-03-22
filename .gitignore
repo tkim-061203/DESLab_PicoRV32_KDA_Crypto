@@ -44,3 +44,6 @@ openlane/designs/*/runs/*/*
 openlane/designs/*/runs/*
 !openlane/designs/*/runs/*/
 !openlane/designs/*/runs/*/final/
+*.gds
+*.gds.gz
+*.lef
