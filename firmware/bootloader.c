@@ -36,7 +36,7 @@
 
 #define APP_BASE 0x00010000UL
 #define APP_START_SECTOR 2048UL
-#define MAX_FW_BYTES (60UL * 1024UL) /* 60 KB — chừa 4 KB cho BL data */
+#define MAX_FW_BYTES (60UL * 1024UL)
 
 /* =========================================================
  * memcpy (no stdlib)
@@ -54,7 +54,7 @@ void *memcpy(void *dst, const void *src, unsigned int n) {
  * ========================================================= */
 static void uart_putc(char c) {
   while (!(UART_STATUS & 1))
-    ; /* chờ tx_ready */
+    ;
   UART_TX = (uint8_t)c;
 }
 
@@ -83,8 +83,8 @@ static void uart_puthw(uint32_t v) /* print 8 hex digits */
  *   SD_STATUS[1] = busy  (transfer in progress)
  *   SD_STATUS[0] = done  (sticky, cleared on next start)
  *
- * Dùng done_sticky (bit 0) thay vì busy (bit 1) để tránh
- * race condition ở tốc độ SPI cao.
+ * Note: Use done_sticky (bit 0) instead of busy (bit 1) to avoid
+ * race conditions at high SPI speeds.
  * ========================================================= */
 static uint8_t spi_xfer(uint8_t tx) {
   while (SD_STATUS & 0x2)
@@ -105,7 +105,7 @@ static void sd_end(void) {
 }
 
 /* =========================================================
- * sd_cmd — gửi 6-byte command, chờ R1 (bit7=0)
+ * sd_cmd — send 6-byte command, wait for R1 (bit7=0)
  * ========================================================= */
 static uint8_t sd_cmd(uint8_t cmd, uint32_t arg, uint8_t crc) {
   uint8_t r;
@@ -130,7 +130,7 @@ static uint8_t sd_cmd(uint8_t cmd, uint32_t arg, uint8_t crc) {
 }
 
 /* =========================================================
- * sd_poweron — >= 80 clock pulses với CS=HIGH
+ * sd_poweron — >= 80 clock pulses with CS=HIGH
  * ========================================================= */
 static void sd_poweron(void) {
   SD_CLKDIV = 199;
@@ -259,7 +259,7 @@ static int sd_init(void) {
 }
 
 /* =========================================================
- * sd_read_sector — đọc 512-byte sector từ SD card
+ * sd_read_sector — read 512-byte sector from SD card
  * ========================================================= */
 static int sd_read_sector(uint32_t sector, uint8_t *buf) {
   uint32_t arg = g_sdhc ? sector : (sector * 512);
@@ -296,10 +296,10 @@ static int sd_read_sector(uint32_t sector, uint8_t *buf) {
 }
 
 /* =========================================================
- * load_fw — đọc header, load toàn bộ firmware vào App BRAM
+ * load_fw — read header, load full firmware to App BRAM
  *
- * sbuf[512] nằm ở BL_RAM (0x1F000+) nhờ linker script,
- * KHÔNG xung đột với firmware load area (0x10000+).
+ * sbuf[512] is located in BL_RAM (0x1F000+) via linker script,
+ * NOT conflicting with firmware load area (0x10000+).
  * ========================================================= */
 static uint8_t sbuf[512];
 
@@ -327,11 +327,11 @@ static int load_fw(void) {
     return -2;
   }
 
-  /* byte [4..511]: đầu firmware (508 bytes tối đa) */
+  /* byte [4..511]: firmware head (max 508 bytes) */
   uint32_t written = (sz < 508) ? sz : 508;
   memcpy(app, sbuf + 4, written);
 
-  /* Các sector tiếp theo */
+  /* Remaining sectors */
   while (written < sz) {
     if (sd_read_sector(sector++, sbuf) != 0)
       return -3;

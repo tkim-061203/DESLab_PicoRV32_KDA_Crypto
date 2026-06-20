@@ -18,6 +18,7 @@ ARCH_FLAGS = -march=rv32i -mabi=ilp32
 CFLAGS_COMMON = $(ARCH_FLAGS) -Os -g \
     -ffreestanding -fno-builtin \
     -Wall -Wextra \
+    -ffunction-sections -fdata-sections \
     -nostdlib -nostartfiles
 
 # -------------------------------------------------------
@@ -58,11 +59,14 @@ APP_ELF    = firmware.elf
 APP_BIN    = firmware.bin
 APP_DUMP   = firmware.dis
 
+# Skip SD card test to keep firmware within 16 KB App BRAM
+APP_CFLAGS = $(CFLAGS_COMMON) -DSKIP_SD_TEST=1 -Wno-unused-function
+
 .PHONY: firmware
 firmware: $(APP_BIN)
 
 $(APP_ELF): $(APP_SRCS) $(APP_LD)
-	$(CC) $(CFLAGS_COMMON) -T $(APP_LD) -o $@ $(APP_SRCS)
+	$(CC) $(APP_CFLAGS) -Wl,--gc-sections -T $(APP_LD) -o $@ $(APP_SRCS) -lgcc
 	@echo "[APP] Size:"
 	@$(CROSS)-size $@
 

@@ -3,7 +3,6 @@
 // Matches xoodoo_round.vhd functionality
 // Uses flattened 384-bit vectors for Verilog compatibility
 //--------------------------------------------------------------------------------
-`timescale 1ns / 1ps
 module xoodoo_round(
     state_in,
     rc,

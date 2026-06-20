@@ -1,5 +1,6 @@
 `default_nettype none
 /* Blackbox stub for xoodyakcore hardened macro */
+(* blackbox *)
 module xoodyakcore (
 `ifdef USE_POWER_PINS
     inout  wire          VPWR,

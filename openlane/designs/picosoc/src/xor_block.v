@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 module xor_block (
     input  [127:0] s1,           // input block s1
     input  [127:0] s2,           // input block s2

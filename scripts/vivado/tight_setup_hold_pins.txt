@@ -1,5 +1,27 @@
-+====================+===================+=========================+
-| Launch Setup Clock | Launch Hold Clock | Pin                     |
-+====================+===================+=========================+
-| clk                | clk               | u_xoodyak/valid_r_reg/D |
-+--------------------+-------------------+-------------------------+
++====================+===================+==========================================================+
+| Launch Setup Clock | Launch Hold Clock | Pin                                                      |
++====================+===================+==========================================================+
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[373]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[380]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[369]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[379]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[375]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[367]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[372]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[364]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[352]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[370]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[357]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[381]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[366]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[354]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[359]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[378]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[362]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[355]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[360]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[368]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[356]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[363]/D |
+| clk                | clk               | u_aead/u_cluster/u_xoodyak/u_xoodoo/reg_value_reg[365]/D |
++--------------------+-------------------+----------------------------------------------------------+

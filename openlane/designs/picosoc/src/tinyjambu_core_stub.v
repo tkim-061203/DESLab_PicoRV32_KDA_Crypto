@@ -1,5 +1,6 @@
 `default_nettype none
 /* Blackbox stub for tinyjambu_core hardened macro */
+(* blackbox *)
 module tinyjambu_core (
 `ifdef USE_POWER_PINS
     inout  wire          VPWR,

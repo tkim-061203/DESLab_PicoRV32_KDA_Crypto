@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 module pho (
     input  [127:0] Y,
     input  [127:0] M,

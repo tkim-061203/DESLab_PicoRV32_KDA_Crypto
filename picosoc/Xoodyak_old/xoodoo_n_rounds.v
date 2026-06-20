@@ -9,7 +9,7 @@ module xoodoo_n_rounds(
     rc_state_in,
     rc_state_out
 );
-    parameter roundPerCycle = 3;
+    parameter roundPerCycle = 1;
     
     input  [383:0] state_in;
     output [383:0] state_out;

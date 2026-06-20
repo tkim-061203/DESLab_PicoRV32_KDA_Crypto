@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 module padding (
     input  [127:0] data_in,      
     input  [4:0]   num_bytes,    // Number of valid bytes (0-16) --> 2^5 =32 

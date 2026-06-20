@@ -1,5 +1,6 @@
 `default_nettype none
 /* Blackbox stub for cofb_core hardened macro */
+(* blackbox *)
 module cofb_core (
 `ifdef USE_POWER_PINS
     inout  wire         VPWR,

@@ -3,7 +3,6 @@
 // - 40 rounds
 // - 1 round / cycle
 // ============================================================
-`timescale 1ns / 1ps
 module gift128_encrypt_top (
     input  wire        clk,
     input  wire        rst_n,

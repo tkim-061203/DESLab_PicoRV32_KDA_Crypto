@@ -1,11 +1,14 @@
 `timescale 1 ns / 1 ps
-// MEMORY MAP
-//   0x0000_0000 – 0x0000_0FFF  Boot BRAM  4 KB  (bootloader, RO)
-//   0x0001_0000 – 0x0001_FFFF  App  BRAM 16 KB  (loaded from SD)
+// ============================================================
+// PicoSoC — AXI System Bus + APB Peripheral Bus
+// ============================================================
+// MEMORY MAP (firmware-compatible)
+//   0x0000_0000 – 0x0000_0FFF  Boot BRAM  4 KB  (RO, on APB)
+//   0x0001_0000 – 0x0001_FFFF  App  BRAM 64 KB  (RW, on AXI)
 //   0x1000_0000                LED  out_byte     W
 //   0x1000_0004                UART TX Data      W
 //   0x1000_0008                UART RX Data      R
-//   0x1000_000C                UART Status       R  [1]=rx_valid [0]=tx_ready
+//   0x1000_000C                UART Status       R
 //   0x1000_0010                UART Baud Divider R/W
 //   0x2000_0000                Switches          R
 //   0x2000_0004                Buttons           R
@@ -13,74 +16,39 @@
 //   0x4000_0000 – 0x4000_0074  Xoodyak           R/W
 //   0x5000_0000 – 0x5000_0078  GIFT-COFB         R/W
 //   0x6000_0000 – 0x6000_000C  SD SPI Master     R/W
-//
-// SD SPI REGISTERS
-//   0x6000_0000  DATA   W=tx byte (starts xfer)  R=last rx byte
-//   0x6000_0004  STATUS R  [2]=cs_n [1]=busy [0]=done_sticky
-//   0x6000_0008  CTRL   W  [0]=cs_n
-//   0x6000_000C  CLKDIV W  [15:0] half-period divider
-//                          199 → ~250 kHz (init), 1 → 25 MHz (run)
-//
-// UART TIMING  (100 MHz clock, 115200 baud)
-//   868 clocks/bit × 10 bits = 8680 clocks/byte
-//   tx_countdown = 9000  (≥ 8680, safe margin)
-//
-// TinyJAMBU  base 0x3000_0000
-//   0x00-0x0C KEY[3:0]   0x10-0x18 NONCE[2:0]
-//   0x1C-0x28 AD[3:0]    0x2C-0x38 DIN[3:0]
-//   0x3C-0x40 TAGIN[1:0] 0x44 CTRL  0x48 STATUS
-//   0x4C-0x58 DOUT[3:0]  0x5C-0x60 TAGOUT[1:0]
-//   CTRL: [18:16]=sel_type [12:8]=ad_len [4:0]=data_len
-//
-// Xoodyak    base 0x4000_0000
-//   0x00-0x0C KEY[3:0]   0x10-0x1C NONCE[3:0]
-//   0x20-0x2C AD[3:0]    0x30-0x3C DIN[3:0]
-//   0x40-0x4C TAGIN[3:0] 0x50 CTRL  0x54 STATUS
-//   0x58-0x64 DOUT[3:0]  0x68-0x74 TAGOUT[3:0]
-//   CTRL: [18:16]=sel_type [12:8]=ad_len [4:0]=data_len
-//
-// GIFT-COFB  base 0x5000_0000
-//   0x00-0x0C KEY[3:0]   0x10-0x1C NONCE[3:0]
-//   0x20-0x2C AD[3:0]    0x30-0x3C DIN[3:0]
-//   0x40-0x4C TAGIN[3:0] 0x50 CTRL  0x54 STATUS
-//   0x58-0x64 DOUT[3:0]  0x68-0x74 TAGOUT[3:0]
-//   0x78 ACK  W  [1]=ad_ack [0]=msg_ack
-//   CTRL: [16]=decrypt [15:8]=ad_len [7:0]=data_len
-//   STATUS: [3]=ad_req [2]=msg_req [1]=done [0]=valid
 // ============================================================
 
-module system (
+module system #(
+    parameter BOOT_SIZE = 1024,           // 4 KB in words
+    parameter APP_SIZE  = 16384,          // 64 KB in words
+    parameter UART_TX_HOLDOFF = 16'd9000
+) (
+`ifdef USE_POWER_PINS
+    inout  wire          VPWR,
+    inout  wire          VGND,
+    inout  wire          vccd1,
+    inout  wire          vssd1,
+`endif
     input            clk,
     input            resetn_btn,
     output           trap,
     output reg [7:0] out_byte,
     output reg       out_byte_en,
-
     input      [3:0] sw,
     input      [3:0] btn,
-
     output           uart_tx,
     input            uart_rx,
-
     output           sd_cs_n,
     output           sd_sck,
     output           sd_mosi,
     input            sd_miso
-`ifdef USE_POWER_PINS
-    , inout          VPWR,
-    inout            VGND
-`endif
 );
-
-    parameter FAST_MEMORY = 1;
-    parameter BOOT_SIZE   = 1024;   // 4 KB in words
-    parameter APP_SIZE    = 4096;  // 16 KB in words
-
+    // Power pins are now inout ports (declared in port list above)
     // --------------------------------------------------------
     // Power-on reset
     // --------------------------------------------------------
-    reg [5:0] reset_cnt    = 0;
-    reg [2:0] resetn_sync  = 3'b000;
+    reg [5:0] reset_cnt = 0;
+    reg [2:0] resetn_sync = 3'b000;
 
     always @(posedge clk)
         resetn_sync <= {resetn_sync[1:0], resetn_btn};
@@ -97,7 +65,7 @@ module system (
     // --------------------------------------------------------
     // Switch / Button synchroniser
     // --------------------------------------------------------
-    reg [3:0] sw_sync1,  sw_sync2;
+    reg [3:0] sw_sync1, sw_sync2;
     reg [3:0] btn_sync1, btn_sync2;
 
     always @(posedge clk) begin
@@ -121,6 +89,7 @@ module system (
     reg        tx_busy;
     reg [15:0] tx_countdown;
     wire uart_tx_ready = !tx_busy;
+
 
     simpleuart #(.DEFAULT_DIV(868)) uart_inst (
         .clk        (clk),
@@ -180,601 +149,410 @@ module system (
     end
 
     // --------------------------------------------------------
-    // TinyJAMBU (0x3000_0000)
+    // Crypto wrappers (APB-backed MMIO macros)
     // --------------------------------------------------------
-    reg [127:0] jb_key;
-    reg [ 95:0] jb_nonce;
-    reg [127:0] jb_ad, jb_data_in;
-    reg [ 63:0] jb_tag_in;
-    reg [  4:0] jb_ad_length, jb_data_length;
-    reg [  2:0] jb_sel_type;
-    reg         jb_ena;
-    reg         jb_done_sticky, jb_valid_sticky;
+    wire [31:0] prdata_jambu;
+    wire [31:0] prdata_xdy;
+    wire [31:0] prdata_gcofb;
+    // --------------------------------------------------------
+    // Memory — Boot SRAM (4 KB, 1RW) + App SRAM (16 KB, 4x1RW)
+    // Driven from APB / AXI sections below
+    // --------------------------------------------------------
+    wire        boot_csb;
+    wire [10:0] boot_addr;
+    wire [32:0] boot_dout;
 
-    wire [127:0] jb_data_out;
-    wire [ 63:0] jb_tag_out;
-    wire         jb_valid, jb_done;
+    sky130_sram_4kbyte_1rw_32x1024_8 u_boot_sram (
 
-    tinyjambu_core u_jambu (
-`ifdef USE_POWER_PINS
-        .VPWR(VPWR), .VGND(VGND),
-`endif
-        .clk        (clk),      .rst_n      (resetn),
-        .ena        (jb_ena),   .sel_type   (jb_sel_type),
-        .key        (jb_key),   .nonce      (jb_nonce),
-        .ad         (jb_ad),    .ad_length  (jb_ad_length),
-        .data_length(jb_data_length),
-        .data_in    (jb_data_in),.tag_in    (jb_tag_in),
-        .data_out   (jb_data_out),.tag      (jb_tag_out),
-        .valid      (jb_valid), .done       (jb_done)
+        .clk0       (clk),
+        .csb0       (boot_csb),
+        .web0       (1'b1),
+        .spare_wen0 (1'b0),
+        .addr0      (boot_addr),
+        .din0       (33'b0),
+        .dout0      (boot_dout)
     );
 
-    always @(posedge clk) begin
-        if      (!resetn) begin jb_done_sticky<=0; jb_valid_sticky<=0; end
-        else if (jb_ena)  begin jb_done_sticky<=0; jb_valid_sticky<=0; end
-        else if (jb_done) begin jb_done_sticky<=1; jb_valid_sticky<=jb_valid; end
-    end
+    wire        app_csb;
+    wire        app_web;
+    wire [11:0] app_addr;
+    wire [31:0] app_din;
+    wire [31:0] app_dout;
 
-    // --------------------------------------------------------
-    // Xoodyak (0x4000_0000)
-    // --------------------------------------------------------
-    reg [127:0] xd_key, xd_nonce, xd_ad, xd_data_in, xd_tag_in;
-    reg [  4:0] xd_ad_length, xd_data_length;
-    reg [  1:0] xd_sel_type;
-    reg         xd_ena;
-    reg         xd_done_sticky, xd_valid_sticky;
-
-    wire [127:0] xd_data_out, xd_tag_out;
-    wire         xd_valid, xd_done;
-
-    xoodyakcore u_xoodyak (
-`ifdef USE_POWER_PINS
-        .VPWR(VPWR), .VGND(VGND),
-`endif
-        .clk        (clk),      .rst_n      (resetn),
-        .ena        (xd_ena),   .restart    (1'b0),
-        .sel_type   (xd_sel_type),
-        .key        (xd_key),   .nonce      (xd_nonce),
-        .ad         (xd_ad),    .ad_length  (xd_ad_length),
-        .data_length(xd_data_length),
-        .data_in    (xd_data_in),.tag_in    (xd_tag_in),
-        .valid      (xd_valid), .tag        (xd_tag_out),
-        .data_out   (xd_data_out),.done     (xd_done)
-    );
-
-    always @(posedge clk) begin
-        if      (!resetn) begin xd_done_sticky<=0; xd_valid_sticky<=0; end
-        else if (xd_ena)  begin xd_done_sticky<=0; xd_valid_sticky<=0; end
-        else if (xd_done) begin xd_done_sticky<=1; xd_valid_sticky<=xd_valid; end
-    end
-
-    // --------------------------------------------------------
-    // GIFT-COFB (0x5000_0000)
-    // --------------------------------------------------------
-    reg [127:0] gc_key, gc_nonce, gc_ad, gc_data_in, gc_tag_in;
-    reg [  7:0] gc_ad_length, gc_data_length;
-    reg         gc_decrypt_mode;
-    reg         gc_start;
-    reg         gc_ad_ack, gc_msg_ack;
-    reg         gc_done_sticky, gc_valid_sticky;
-
-    wire [127:0] gc_data_out, gc_tag_out;
-    wire         gc_valid, gc_done;
-    wire         gc_ad_req, gc_msg_req;
-    wire         gc_data_out_valid;
-
-    cofb_core u_giftcofb (
-`ifdef USE_POWER_PINS
-        .VPWR(VPWR), .VGND(VGND),
-`endif
-        .clk          (clk),           .rst_n        (resetn),
-        .start        (gc_start),      .decrypt_mode (gc_decrypt_mode),
-        .key          (gc_key),        .nonce        (gc_nonce),
-        .ad_data      (gc_ad),         .ad_total_len (gc_ad_length),
-        .ad_ack       (gc_ad_ack),
-        .msg_data     (gc_data_in),    .msg_total_len(gc_data_length),
-        .msg_ack      (gc_msg_ack),
-        .tag_in       (gc_tag_in),
-        .ad_req       (gc_ad_req),     .msg_req      (gc_msg_req),
-        .data_out     (gc_data_out),   .data_out_valid(gc_data_out_valid),
-        .tag_out      (gc_tag_out),
-        .valid        (gc_valid),      .done         (gc_done)
-    );
-
-    always @(posedge clk) begin
-        if      (!resetn)  begin gc_done_sticky<=0; gc_valid_sticky<=0; end
-        else if (gc_start) begin gc_done_sticky<=0; gc_valid_sticky<=0; end
-        else if (gc_done)  begin gc_done_sticky<=1; gc_valid_sticky<=gc_valid; end
-    end
-
-    // --------------------------------------------------------
-    // PicoRV32 CPU
-    // --------------------------------------------------------
-    wire mem_valid, mem_instr;
-    reg  mem_ready;
-    wire [31:0] mem_addr,    mem_wdata;
-    wire [3:0]  mem_wstrb;
-    reg  [31:0] mem_rdata;
-
-    wire        mem_la_read,  mem_la_write;
-    wire [31:0] mem_la_addr,  mem_la_wdata;
-    wire [3:0]  mem_la_wstrb;
-
-    picorv32 picorv32_core (
-        .clk        (clk),          .resetn     (resetn),
-        .trap       (trap),
-        .mem_valid  (mem_valid),    .mem_instr  (mem_instr),
-        .mem_ready  (mem_ready),    .mem_addr   (mem_addr),
-        .mem_wdata  (mem_wdata),    .mem_wstrb  (mem_wstrb),
-        .mem_rdata  (mem_rdata),
-        .mem_la_read(mem_la_read),  .mem_la_write(mem_la_write),
-        .mem_la_addr(mem_la_addr),  .mem_la_wdata(mem_la_wdata),
-        .mem_la_wstrb(mem_la_wstrb),
-        /* Pico Co-Processor Interface (PCPI) */
-        .pcpi_valid (),             .pcpi_insn  (),
-        .pcpi_rs1   (),             .pcpi_rs2   (),
-        .pcpi_wr    (1'b0),         .pcpi_rd    (32'b0),
-        .pcpi_wait  (1'b0),         .pcpi_ready (1'b0),
-        /* IRQ Interface */
-        .irq        (32'b0),        .eoi        (),
-        /* Trace Interface */
-        .trace_valid(),             .trace_data ()
-    );
-
-    // Boot SRAM  4 KB
-    wire [31:0] boot_sram_dout;
-    sky130_sram_4kbyte_1rw1r_32x1024_8 u_boot_sram (
-        `ifdef USE_POWER_PINS .vccd1(VPWR), .vssd1(VGND), `endif
-        .clk0(clk), .csb0(!(mem_la_addr < 32'h0000_1000)),
-        .web0(!mem_la_write), .wmask0(mem_la_wstrb), .addr0(mem_la_addr[11:2]), .din0(mem_la_wdata), .dout0(boot_sram_dout),
-        .clk1(clk), .csb1(1'b1), .addr1(10'b0), .dout1()
-    );
-
-    // App SRAM  16 KB  (4 × 4 kB banks via wrapper)
-    wire [31:0] app_sram_dout;
     sram_16kb_wrapper u_app_sram (
-        `ifdef USE_POWER_PINS .vccd1(VPWR), .vssd1(VGND), `endif
-        .clk0(clk), .csb0(!(mem_la_addr[31:16] == 16'h0001 && mem_la_addr[15:14] == 2'b00)),
-        .web0(!mem_la_write), .wmask0(mem_la_wstrb), .addr0(mem_la_addr[13:2]), .din0(mem_la_wdata), .dout0(app_sram_dout),
-        .clk1(clk), .csb1(1'b1), .addr1(12'b0), .dout1()
+`ifdef USE_POWER_PINS
+        .vccd1  (vccd1),
+        .vssd1  (vssd1),
+`endif
+        .clk0   (clk),
+        .csb0   (app_csb),
+        .web0   (app_web),
+        .addr0  (app_addr),
+        .din0   (app_din),
+        .dout0  (app_dout)
     );
 
-    reg [31:0] m_read_data;
-    reg        m_read_en;
+    // ========================================================
+    // PicoRV32 CPU — AXI4-Lite Master
+    // ========================================================
+    wire        cpu_awvalid, cpu_wvalid, cpu_arvalid;
+    wire [31:0] cpu_awaddr, cpu_wdata, cpu_araddr;
+    wire [ 3:0] cpu_wstrb;
+    wire [ 2:0] cpu_awprot, cpu_arprot;
+    wire        cpu_bready, cpu_rready;
+
+    // To CPU (from interconnect)
+    wire        cpu_awready, cpu_wready, cpu_bvalid;
+    wire        cpu_arready, cpu_rvalid;
+    wire [31:0] cpu_rdata;
+
+    picorv32_axi cpu (
+        .clk(clk), .resetn(resetn), .trap(trap),
+        .mem_axi_awvalid(cpu_awvalid), .mem_axi_awready(cpu_awready),
+        .mem_axi_awaddr (cpu_awaddr),  .mem_axi_awprot (cpu_awprot),
+        .mem_axi_wvalid (cpu_wvalid),  .mem_axi_wready (cpu_wready),
+        .mem_axi_wdata  (cpu_wdata),   .mem_axi_wstrb  (cpu_wstrb),
+        .mem_axi_bvalid (cpu_bvalid),  .mem_axi_bready (cpu_bready),
+        .mem_axi_arvalid(cpu_arvalid), .mem_axi_arready(cpu_arready),
+        .mem_axi_araddr (cpu_araddr),  .mem_axi_arprot (cpu_arprot),
+        .mem_axi_rvalid (cpu_rvalid),  .mem_axi_rready (cpu_rready),
+        .mem_axi_rdata  (cpu_rdata),
+        // PCPI — unused
+        .pcpi_wr(1'b0), .pcpi_rd(32'b0),
+        .pcpi_wait(1'b0), .pcpi_ready(1'b0),
+        // IRQ — unused
+        .irq(32'b0),
+        .eoi(),
+        // Trace — unused
+        .trace_valid(), .trace_data()
+    );
 
     // ========================================================
-    // FAST_MEMORY path  (FAST_MEMORY=1, default)
-    //   mem_ready asserted every cycle; address decoded from
-    //   mem_la_addr (look-ahead, 1 cycle ahead of mem_addr)
+    // AXI INTERCONNECT — 1 Master × 2 Slaves
     // ========================================================
-    generate
-    if (FAST_MEMORY) begin : gen_fast_mem
+    // Slave 0 = RAM  (addr[31:16] == 0x0001)
+    // Slave 1 = APB  (everything else)
 
-        always @(posedge clk) begin
-            if (!resetn) begin
-                mem_ready       <= 0;
-                out_byte_en     <= 0;
-                uart_we         <= 0;   uart_rx_rd   <= 0;
-                uart_div_we     <= 0;   uart_div_di  <= 0;
-                tx_busy         <= 0;   tx_countdown <= 0;
-                // TinyJAMBU
-                jb_key<=0; jb_nonce<=0; jb_ad<=0; jb_data_in<=0; jb_tag_in<=0;
-                jb_ad_length<=0; jb_data_length<=0; jb_sel_type<=3'b001; jb_ena<=0;
-                // Xoodyak
-                xd_key<=0; xd_nonce<=0; xd_ad<=0; xd_data_in<=0; xd_tag_in<=0;
-                xd_ad_length<=0; xd_data_length<=0; xd_sel_type<=0; xd_ena<=0;
-                // GIFT-COFB
-                gc_key<=0; gc_nonce<=0; gc_ad<=0; gc_data_in<=0; gc_tag_in<=0;
-                gc_ad_length<=0; gc_data_length<=0; gc_decrypt_mode<=0; gc_start<=0;
-                gc_ad_ack<=0; gc_msg_ack<=0;
-                // SD SPI
-                sdspi_tx_data<=8'hFF; sdspi_clkdiv<=16'd199;
-                sdspi_start<=0; sdspi_cs_n_reg<=1'b1;
-            end else begin
-                // defaults (single-cycle pulses)
-                mem_ready     <= 1;
-                out_byte_en   <= 0;
-                uart_we       <= 0;
-                uart_rx_rd    <= 0;
-                uart_div_we   <= 0;
-                uart_div_di   <= 0;
-                jb_ena        <= 0;
-                xd_ena        <= 0;
-                gc_start      <= 0;
-                gc_ad_ack     <= 0;
-                gc_msg_ack    <= 0;
-                sdspi_start   <= 0;
+    wire [31:0] decode_addr = cpu_awvalid ? cpu_awaddr : cpu_araddr;
+    wire decode_is_ram = (decode_addr[31:16] == 16'h0001);
 
-                // UART TX busy countdown
-                if (tx_busy) begin
-                    if (tx_countdown != 0) tx_countdown <= tx_countdown - 1;
-                    else                   tx_busy      <= 0;
+    // Track which slave owns the in-flight transaction
+    reg  active_is_ram;
+    reg  txn_active;
+    always @(posedge clk) begin
+        if (!resetn) begin
+            txn_active <= 0;
+        end else begin
+            if (!txn_active && (cpu_awvalid || cpu_arvalid)) begin
+                active_is_ram <= decode_is_ram;
+                txn_active    <= 1;
+            end
+            if (txn_active && ((cpu_bvalid && cpu_bready) ||
+                               (cpu_rvalid && cpu_rready)))
+                txn_active <= 0;
+        end
+    end
+
+    wire is_ram = txn_active ? active_is_ram : decode_is_ram;
+
+    // --- RAM slave AXI signals ---
+    wire ram_awready, ram_wready, ram_bvalid;
+    wire ram_arready, ram_rvalid;
+    wire [31:0] ram_rdata;
+
+    // --- Bridge AXI signals ---
+    wire brg_awready, brg_wready, brg_bvalid;
+    wire brg_arready, brg_rvalid;
+    wire [31:0] brg_rdata;
+
+    // Mux responses back to CPU
+    assign cpu_awready = is_ram ? ram_awready : brg_awready;
+    assign cpu_wready  = is_ram ? ram_wready  : brg_wready;
+    assign cpu_bvalid  = is_ram ? ram_bvalid  : brg_bvalid;
+    assign cpu_arready = is_ram ? ram_arready : brg_arready;
+    assign cpu_rvalid  = is_ram ? ram_rvalid  : brg_rvalid;
+    assign cpu_rdata   = is_ram ? ram_rdata   : brg_rdata;
+
+    // Gated valids to each slave
+    wire ram_i_awv = cpu_awvalid &  is_ram;
+    wire ram_i_wv  = cpu_wvalid  &  is_ram;
+    wire ram_i_arv = cpu_arvalid &  is_ram;
+    wire brg_i_awv = cpu_awvalid & ~is_ram;
+    wire brg_i_wv  = cpu_wvalid  & ~is_ram;
+    wire brg_i_arv = cpu_arvalid & ~is_ram;
+
+    // ========================================================
+    // AXI SLAVE 0 — App SRAM (16 KB via sram_16kb_wrapper)
+    // ========================================================
+    reg        ram_bvalid_r, ram_rvalid_r;
+    reg        ram_rd_pending;
+    reg [31:0] ram_rdata_r;
+
+    wire ram_wr_accept = ram_i_awv && ram_i_wv  && !ram_bvalid_r;
+    wire ram_rd_accept = ram_i_arv && !ram_rvalid_r && !ram_rd_pending && !ram_wr_accept;
+
+    assign ram_awready = ram_wr_accept;
+    assign ram_wready  = ram_wr_accept;
+    assign ram_bvalid  = ram_bvalid_r;
+    assign ram_arready = ram_rd_accept;
+    assign ram_rvalid  = ram_rvalid_r;
+    assign ram_rdata   = ram_rdata_r;
+
+    assign app_csb  = !(ram_wr_accept || ram_rd_accept);
+    assign app_web  = !ram_wr_accept;
+    assign app_addr = ram_wr_accept ? (cpu_awaddr - 32'h0001_0000) >> 2
+                                    : (cpu_araddr - 32'h0001_0000) >> 2;
+    assign app_din  = cpu_wdata;
+
+    always @(posedge clk) begin
+        if (!resetn) begin
+            ram_bvalid_r  <= 0;
+            ram_rvalid_r  <= 0;
+            ram_rd_pending <= 0;
+        end else begin
+            if (ram_bvalid_r && cpu_bready) ram_bvalid_r  <= 0;
+            if (ram_rvalid_r && cpu_rready) ram_rvalid_r  <= 0;
+            if (ram_wr_accept) ram_bvalid_r <= 1;
+            ram_rd_pending <= ram_rd_accept;
+            if (ram_rd_pending) begin
+                ram_rdata_r  <= app_dout;
+                ram_rvalid_r <= 1;
+            end
+        end
+    end
+
+    // ========================================================
+    // AXI SLAVE 1 — AXI-to-APB Bridge
+    // ========================================================
+    localparam BRG_IDLE   = 2'd0;
+    localparam BRG_SETUP  = 2'd1;
+    localparam BRG_ACCESS = 2'd2;
+
+    reg [1:0]  brg_state;
+    reg        brg_bvalid_r, brg_rvalid_r;
+    reg [31:0] brg_rdata_r;
+
+    // APB master outputs (directly from bridge regs)
+    reg        apb_psel, apb_penable, apb_pwrite;
+    reg [31:0] apb_paddr, apb_pwdata;
+
+    wire [31:0] apb_prdata;            // muxed from peripherals
+    wire        apb_pready = 1'b1;     // all slaves: no wait
+
+    wire brg_aw_acc = (brg_state == BRG_IDLE) && brg_i_awv && brg_i_wv && !brg_bvalid_r;
+    wire brg_ar_acc = (brg_state == BRG_IDLE) && brg_i_arv && !brg_rvalid_r && !brg_aw_acc;
+
+    assign brg_awready = brg_aw_acc;
+    assign brg_wready  = brg_aw_acc;
+    assign brg_arready = brg_ar_acc;
+    assign brg_bvalid  = brg_bvalid_r;
+    assign brg_rvalid  = brg_rvalid_r;
+    assign brg_rdata   = brg_rdata_r;
+
+    always @(posedge clk) begin
+        if (!resetn) begin
+            brg_state    <= BRG_IDLE;
+            brg_bvalid_r <= 0;
+            brg_rvalid_r <= 0;
+            apb_psel     <= 0;
+            apb_penable  <= 0;
+        end else begin
+            // Clear completed responses
+            if (brg_bvalid_r && cpu_bready) brg_bvalid_r <= 0;
+            if (brg_rvalid_r && cpu_rready) brg_rvalid_r <= 0;
+
+            case (brg_state)
+                BRG_IDLE: begin
+                    if (brg_aw_acc) begin
+                        apb_psel    <= 1;
+                        apb_penable <= 0;
+                        apb_pwrite  <= 1;
+                        apb_paddr   <= cpu_awaddr;
+                        apb_pwdata  <= cpu_wdata;
+                        brg_state   <= BRG_SETUP;
+                    end else if (brg_ar_acc) begin
+                        apb_psel    <= 1;
+                        apb_penable <= 0;
+                        apb_pwrite  <= 0;
+                        apb_paddr   <= cpu_araddr;
+                        brg_state   <= BRG_SETUP;
+                    end
                 end
 
-                // ---- Default BRAM read (before peripheral override) ----
-                if (mem_la_addr < 32'h0000_1000)
-                    mem_rdata <= boot_sram_dout;
-                else if (mem_la_addr[31:16] == 16'h0001 && mem_la_addr[15:14] == 2'b00)
-                    mem_rdata <= app_sram_dout;
-                else
-                    mem_rdata <= 32'h0000_0000;
+                BRG_SETUP: begin
+                    // APB SETUP phase visible (PSEL=1, PENABLE=0)
+                    apb_penable <= 1;
+                    brg_state   <= BRG_ACCESS;
+                end
 
-                // ---- Peripheral READ ----
-                if (mem_la_read) begin
-                    case (mem_la_addr)
-                        // UART / GPIO
-                        32'h1000_0008: begin mem_rdata <= uart_dat_do; uart_rx_rd <= 1; end
-                        32'h1000_000C: mem_rdata <= {30'b0, uart_rx_valid, uart_tx_ready};
-                        32'h1000_0010: mem_rdata <= uart_div_do;
-                        32'h2000_0000: mem_rdata <= {28'b0, sw_sync2};
-                        32'h2000_0004: mem_rdata <= {28'b0, btn_sync2};
-                        // SD SPI
-                        32'h6000_0000: mem_rdata <= {24'd0, sdspi_rx_data_reg};
-                        32'h6000_0004: mem_rdata <= {29'd0, sdspi_cs_n_reg, sdspi_busy, sdspi_done_sticky};
-                        32'h6000_0008: mem_rdata <= {31'd0, sdspi_cs_n_reg};
-                        32'h6000_000C: mem_rdata <= {16'd0, sdspi_clkdiv};
-                        // TinyJAMBU
-                        32'h3000_0048: mem_rdata <= {30'd0, jb_done_sticky, jb_valid_sticky};
-                        32'h3000_004C: mem_rdata <= jb_data_out[ 31:  0];
-                        32'h3000_0050: mem_rdata <= jb_data_out[ 63: 32];
-                        32'h3000_0054: mem_rdata <= jb_data_out[ 95: 64];
-                        32'h3000_0058: mem_rdata <= jb_data_out[127: 96];
-                        32'h3000_005C: mem_rdata <= jb_tag_out [ 31:  0];
-                        32'h3000_0060: mem_rdata <= jb_tag_out [ 63: 32];
-                        // Xoodyak
-                        32'h4000_0054: mem_rdata <= {30'd0, xd_done_sticky, xd_valid_sticky};
-                        32'h4000_0058: mem_rdata <= xd_data_out[ 31:  0];
-                        32'h4000_005C: mem_rdata <= xd_data_out[ 63: 32];
-                        32'h4000_0060: mem_rdata <= xd_data_out[ 95: 64];
-                        32'h4000_0064: mem_rdata <= xd_data_out[127: 96];
-                        32'h4000_0068: mem_rdata <= xd_tag_out [ 31:  0];
-                        32'h4000_006C: mem_rdata <= xd_tag_out [ 63: 32];
-                        32'h4000_0070: mem_rdata <= xd_tag_out [ 95: 64];
-                        32'h4000_0074: mem_rdata <= xd_tag_out [127: 96];
-                        // GIFT-COFB
-                        32'h5000_0054: mem_rdata <= {28'd0, gc_ad_req, gc_msg_req, gc_done_sticky, gc_valid_sticky};
-                        32'h5000_0058: mem_rdata <= gc_data_out[ 31:  0];
-                        32'h5000_005C: mem_rdata <= gc_data_out[ 63: 32];
-                        32'h5000_0060: mem_rdata <= gc_data_out[ 95: 64];
-                        32'h5000_0064: mem_rdata <= gc_data_out[127: 96];
-                        32'h5000_0068: mem_rdata <= gc_tag_out [ 31:  0];
-                        32'h5000_006C: mem_rdata <= gc_tag_out [ 63: 32];
-                        32'h5000_0070: mem_rdata <= gc_tag_out [ 95: 64];
-                        32'h5000_0074: mem_rdata <= gc_tag_out [127: 96];
+                BRG_ACCESS: begin
+                    // APB ACCESS phase visible (PSEL=1, PENABLE=1)
+                    apb_psel    <= 0;
+                    apb_penable <= 0;
+                    if (apb_pwrite)
+                        brg_bvalid_r <= 1;
+                    else begin
+                        brg_rvalid_r <= 1;
+                        brg_rdata_r  <= apb_prdata;
+                    end
+                    brg_state <= BRG_IDLE;
+                end
+            endcase
+        end
+    end
+
+    // ========================================================
+    // APB INTERCONNECT — Address decode
+    // ========================================================
+    wire psel_rom   = apb_psel && (apb_paddr[31:28] == 4'h0);
+    wire psel_uart  = apb_psel && (apb_paddr[31:28] == 4'h1);
+    wire psel_input = apb_psel && (apb_paddr[31:28] == 4'h2);
+    wire psel_aead = apb_psel && (apb_paddr[31:28] == 4'h3);
+    wire psel_sdspi = apb_psel && (apb_paddr[31:28] == 4'h6);
+
+    // ========================================================
+    // APB READ DATA — Boot ROM via sky130 SRAM
+    // csb0=0 at SETUP phase → dout0 valid at ACCESS phase (1 cycle)
+    // ========================================================
+    assign boot_csb  = !(psel_rom && !apb_penable);
+    assign boot_addr = {1'b0, apb_paddr[11:2]};
+
+    // ========================================================
+    // APB READ DATA — Combinational mux per peripheral
+    // ========================================================
+    reg [31:0] prdata_uart, prdata_input, prdata_sdspi;
+
+    always @* begin
+        case (apb_paddr[4:0])
+            5'h08:   prdata_uart = uart_dat_do;
+            5'h0C:   prdata_uart = {30'b0, uart_rx_valid, uart_tx_ready};
+            5'h10:   prdata_uart = uart_div_do;
+            default: prdata_uart = 32'h0;
+        endcase
+    end
+
+    always @* begin
+        case (apb_paddr[2:0])
+            3'h0:    prdata_input = {28'b0, sw_sync2};
+            3'h4:    prdata_input = {28'b0, btn_sync2};
+            default: prdata_input = 32'h0;
+        endcase
+    end
+
+    always @* begin
+        case (apb_paddr[3:0])
+            4'h0:    prdata_sdspi = {24'd0, sdspi_rx_data_reg};
+            4'h4:    prdata_sdspi = {29'd0, sdspi_cs_n_reg, sdspi_busy,
+                                     sdspi_done_sticky};
+            4'h8:    prdata_sdspi = {31'd0, sdspi_cs_n_reg};
+            4'hC:    prdata_sdspi = {16'd0, sdspi_clkdiv};
+            default: prdata_sdspi = 32'h0;
+        endcase
+    end
+
+    wire [31:0] prdata_aead;
+    wire        pready_aead;
+
+    // Final APB read-data mux
+    assign apb_prdata =
+        psel_rom   ? boot_dout[31:0] :
+        psel_uart  ? prdata_uart  :
+        psel_input ? prdata_input :
+        psel_aead  ? prdata_aead  :
+        psel_sdspi ? prdata_sdspi :
+        32'h0;
+
+    // ========================================================
+    // APB PERIPHERAL WRITE + READ side-effects
+    // ========================================================
+    wire apb_wr = apb_psel && apb_penable && apb_pwrite;
+    wire apb_rd = apb_psel && apb_penable && !apb_pwrite;
+
+    aead_mmap_wrapper u_aead (
+`ifdef USE_POWER_PINS
+        .vccd1   (vccd1),
+        .vssd1   (vssd1),
+`endif
+        .clk     (clk),
+        .rst_n   (resetn),
+        .psel    (apb_psel && psel_aead),
+        .penable (apb_penable),
+        .pwrite  (apb_pwrite),
+        .paddr   (apb_paddr[11:0]),
+        .pwdata  (apb_pwdata),
+        .prdata  (prdata_aead),
+        .pready  (pready_aead),
+        .pslverr ()
+    );
+
+    always @(posedge clk) begin
+        if (!resetn) begin
+            out_byte_en <= 0;
+            uart_we <= 0; uart_rx_rd <= 0;
+            uart_div_we <= 0; uart_div_di <= 0;
+            tx_busy <= 0; tx_countdown <= 0;
+            uart_tx_data <= 0;
+            sdspi_tx_data<=8'hFF; sdspi_clkdiv<=16'd199;
+            sdspi_start<=0; sdspi_cs_n_reg<=1'b1;
+        end else begin
+            // ---- Defaults: clear single-cycle pulses ----
+            out_byte_en <= 0;
+            uart_we     <= 0;
+            uart_rx_rd  <= 0;
+            uart_div_we <= 0;
+            sdspi_start <= 0;
+
+            // UART TX busy countdown
+            if (tx_busy) begin
+                if (tx_countdown != 0) tx_countdown <= tx_countdown - 1;
+                else                   tx_busy      <= 0;
+            end
+
+            // ---- APB WRITE ----
+            if (apb_wr) begin
+                // GPIO / UART (0x1000_xxxx)
+                if (psel_uart) begin
+                    case (apb_paddr[4:0])
+                        5'h00: begin out_byte_en<=1; out_byte<=apb_pwdata[7:0]; end
+                        5'h04: begin
+                            if (!tx_busy) begin
+                                uart_tx_data <= apb_pwdata[7:0];
+                                uart_we      <= 1;
+                                tx_busy      <= 1;
+                                tx_countdown <= UART_TX_HOLDOFF;
+                            end
+                        end
+                        5'h10: begin
+                            uart_div_we <= 4'hF;
+                            uart_div_di <= apb_pwdata;
+                        end
                         default: ;
                     endcase
                 end
 
-                // ---- WRITE ----
-                if (mem_la_write) begin
-                    // App BRAM (Handled by Hard Macro)
-                    if (mem_la_addr[31:16] == 16'h0001) begin
-                        // SRAM Macro handles write internally via web0 and wmask0
-                    end else begin
-                        case (mem_la_addr)
-                            // LED
-                            32'h1000_0000: begin out_byte_en<=1; out_byte<=mem_la_wdata[7:0]; end
-                            // UART TX  (guard: not re-entrant while busy)
-                            32'h1000_0004: begin
-                                if (!tx_busy) begin
-                                    uart_tx_data <= mem_la_wdata[7:0];
-                                    uart_we      <= 1;
-                                    tx_busy      <= 1;
-                                    tx_countdown <= 16'd9000;
-                                end
+                // SD SPI (0x6000_xxxx)
+                if (psel_sdspi) begin
+                    case (apb_paddr[3:0])
+                        4'h0: begin
+                            if (!sdspi_busy) begin
+                                sdspi_tx_data <= apb_pwdata[7:0];
+                                sdspi_start   <= 1;
                             end
-                            // UART baud divider
-                            32'h1000_0010: begin uart_div_we<=mem_la_wstrb; uart_div_di<=mem_la_wdata; end
-                            // SD SPI
-                            32'h6000_0000: begin
-                                if (!sdspi_busy) begin
-                                    sdspi_tx_data <= mem_la_wdata[7:0];
-                                    sdspi_start   <= 1'b1;
-                                end
-                            end
-                            32'h6000_0008: sdspi_cs_n_reg <= mem_la_wdata[0];
-                            32'h6000_000C: sdspi_clkdiv   <= mem_la_wdata[15:0];
-                            // TinyJAMBU
-                            32'h3000_0000: jb_key[  31:  0] <= mem_la_wdata;
-                            32'h3000_0004: jb_key[  63: 32] <= mem_la_wdata;
-                            32'h3000_0008: jb_key[  95: 64] <= mem_la_wdata;
-                            32'h3000_000C: jb_key[ 127: 96] <= mem_la_wdata;
-                            32'h3000_0010: jb_nonce[ 31:  0] <= mem_la_wdata;
-                            32'h3000_0014: jb_nonce[ 63: 32] <= mem_la_wdata;
-                            32'h3000_0018: jb_nonce[ 95: 64] <= mem_la_wdata;
-                            32'h3000_001C: jb_ad[    31:  0] <= mem_la_wdata;
-                            32'h3000_0020: jb_ad[    63: 32] <= mem_la_wdata;
-                            32'h3000_0024: jb_ad[    95: 64] <= mem_la_wdata;
-                            32'h3000_0028: jb_ad[   127: 96] <= mem_la_wdata;
-                            32'h3000_002C: jb_data_in[ 31:  0] <= mem_la_wdata;
-                            32'h3000_0030: jb_data_in[ 63: 32] <= mem_la_wdata;
-                            32'h3000_0034: jb_data_in[ 95: 64] <= mem_la_wdata;
-                            32'h3000_0038: jb_data_in[127: 96] <= mem_la_wdata;
-                            32'h3000_003C: jb_tag_in[ 31:  0] <= mem_la_wdata;
-                            32'h3000_0040: jb_tag_in[ 63: 32] <= mem_la_wdata;
-                            32'h3000_0044: begin
-                                jb_sel_type    <= mem_la_wdata[18:16];
-                                jb_ad_length   <= mem_la_wdata[12: 8];
-                                jb_data_length <= mem_la_wdata[ 4: 0];
-                                jb_ena         <= 1'b1;
-                            end
-                            // Xoodyak
-                            32'h4000_0000: xd_key[  31:  0] <= mem_la_wdata;
-                            32'h4000_0004: xd_key[  63: 32] <= mem_la_wdata;
-                            32'h4000_0008: xd_key[  95: 64] <= mem_la_wdata;
-                            32'h4000_000C: xd_key[ 127: 96] <= mem_la_wdata;
-                            32'h4000_0010: xd_nonce[ 31:  0] <= mem_la_wdata;
-                            32'h4000_0014: xd_nonce[ 63: 32] <= mem_la_wdata;
-                            32'h4000_0018: xd_nonce[ 95: 64] <= mem_la_wdata;
-                            32'h4000_001C: xd_nonce[127: 96] <= mem_la_wdata;
-                            32'h4000_0020: xd_ad[    31:  0] <= mem_la_wdata;
-                            32'h4000_0024: xd_ad[    63: 32] <= mem_la_wdata;
-                            32'h4000_0028: xd_ad[    95: 64] <= mem_la_wdata;
-                            32'h4000_002C: xd_ad[   127: 96] <= mem_la_wdata;
-                            32'h4000_0030: xd_data_in[ 31:  0] <= mem_la_wdata;
-                            32'h4000_0034: xd_data_in[ 63: 32] <= mem_la_wdata;
-                            32'h4000_0038: xd_data_in[ 95: 64] <= mem_la_wdata;
-                            32'h4000_003C: xd_data_in[127: 96] <= mem_la_wdata;
-                            32'h4000_0040: xd_tag_in[ 31:  0] <= mem_la_wdata;
-                            32'h4000_0044: xd_tag_in[ 63: 32] <= mem_la_wdata;
-                            32'h4000_0048: xd_tag_in[ 95: 64] <= mem_la_wdata;
-                            32'h4000_004C: xd_tag_in[127: 96] <= mem_la_wdata;
-                            32'h4000_0050: begin
-                                xd_sel_type    <= mem_la_wdata[17:16];
-                                xd_ad_length   <= mem_la_wdata[12: 8];
-                                xd_data_length <= mem_la_wdata[ 4: 0];
-                                xd_ena         <= 1'b1;
-                            end
-                            // GIFT-COFB
-                            32'h5000_0000: gc_key[  31:  0] <= mem_la_wdata;
-                            32'h5000_0004: gc_key[  63: 32] <= mem_la_wdata;
-                            32'h5000_0008: gc_key[  95: 64] <= mem_la_wdata;
-                            32'h5000_000C: gc_key[ 127: 96] <= mem_la_wdata;
-                            32'h5000_0010: gc_nonce[ 31: 0] <= mem_la_wdata;
-                            32'h5000_0014: gc_nonce[ 63:32] <= mem_la_wdata;
-                            32'h5000_0018: gc_nonce[ 95:64] <= mem_la_wdata;
-                            32'h5000_001C: gc_nonce[127:96] <= mem_la_wdata;
-                            32'h5000_0020: gc_ad[   31:  0] <= mem_la_wdata;
-                            32'h5000_0024: gc_ad[   63: 32] <= mem_la_wdata;
-                            32'h5000_0028: gc_ad[   95: 64] <= mem_la_wdata;
-                            32'h5000_002C: gc_ad[  127: 96] <= mem_la_wdata;
-                            32'h5000_0030: gc_data_in[ 31: 0] <= mem_la_wdata;
-                            32'h5000_0034: gc_data_in[ 63:32] <= mem_la_wdata;
-                            32'h5000_0038: gc_data_in[ 95:64] <= mem_la_wdata;
-                            32'h5000_003C: gc_data_in[127:96] <= mem_la_wdata;
-                            32'h5000_0040: gc_tag_in[ 31: 0] <= mem_la_wdata;
-                            32'h5000_0044: gc_tag_in[ 63:32] <= mem_la_wdata;
-                            32'h5000_0048: gc_tag_in[ 95:64] <= mem_la_wdata;
-                            32'h5000_004C: gc_tag_in[127:96] <= mem_la_wdata;
-                            32'h5000_0050: begin
-                                gc_decrypt_mode <= mem_la_wdata[16];
-                                gc_ad_length    <= mem_la_wdata[15:8];
-                                gc_data_length  <= mem_la_wdata[ 7:0];
-                                gc_start        <= 1'b1;
-                            end
-                            32'h5000_0078: begin
-                                gc_ad_ack  <= mem_la_wdata[1];
-                                gc_msg_ack <= mem_la_wdata[0];
-                            end
-                            default: ;
-                        endcase
-                    end
-                end // mem_la_write
+                        end
+                        4'h8: sdspi_cs_n_reg <= apb_pwdata[0];
+                        4'hC: sdspi_clkdiv   <= apb_pwdata[15:0];
+                        default: ;
+                    endcase
+                end
+
+            end // apb_wr
+
+            // ---- APB READ side-effects ----
+            if (apb_rd) begin
+                if (psel_uart && apb_paddr[4:0] == 5'h08)
+                    uart_rx_rd <= 1;
             end
-        end // always
-
-    // ========================================================
-    // SLOW_MEMORY path  (FAST_MEMORY=0)
-    //   Adds 1 wait-state; uses mem_addr (registered)
-    // ========================================================
-    end else begin : gen_slow_mem
-
-        always @(posedge clk) begin
-            if (!resetn) begin
-                m_read_en<=0; mem_ready<=0; out_byte_en<=0;
-                uart_we<=0; uart_rx_rd<=0; uart_div_we<=0; uart_div_di<=0;
-                tx_busy<=0; tx_countdown<=0;
-                jb_key<=0; jb_nonce<=0; jb_ad<=0; jb_data_in<=0; jb_tag_in<=0;
-                jb_ad_length<=0; jb_data_length<=0; jb_sel_type<=3'b001; jb_ena<=0;
-                xd_key<=0; xd_nonce<=0; xd_ad<=0; xd_data_in<=0; xd_tag_in<=0;
-                xd_ad_length<=0; xd_data_length<=0; xd_sel_type<=0; xd_ena<=0;
-                gc_key<=0; gc_nonce<=0; gc_ad<=0; gc_data_in<=0; gc_tag_in<=0;
-                gc_ad_length<=0; gc_data_length<=0; gc_decrypt_mode<=0; gc_start<=0;
-                gc_ad_ack<=0; gc_msg_ack<=0;
-                sdspi_tx_data<=8'hFF; sdspi_clkdiv<=16'd199;
-                sdspi_start<=0; sdspi_cs_n_reg<=1'b1;
-            end else begin
-                m_read_en   <= 0;
-                mem_ready   <= mem_valid && !mem_ready && m_read_en;
-                out_byte_en <= 0; uart_rx_rd<=0; uart_div_we<=0; uart_div_di<=0;
-                jb_ena<=0; xd_ena<=0; gc_start<=0;
-                gc_ad_ack<=0; gc_msg_ack<=0;
-                sdspi_start<=0; uart_we<=0;
-
-                if (tx_busy) begin
-                    if (tx_countdown != 0) tx_countdown <= tx_countdown - 1;
-                    else                   tx_busy      <= 0;
-                end
-
-                // Default BRAM read (registered, appears in mem_rdata next cycle)
-                if (mem_addr < 32'h0000_1000)
-                    m_read_data <= boot_sram_dout;
-                else if (mem_addr[31:16] == 16'h0001 && mem_addr[15:14] == 2'b00)
-                    m_read_data <= app_sram_dout;
-                else
-                    m_read_data <= 32'h0000_0000;
-                mem_rdata <= m_read_data;
-            end
-
-            (* parallel_case *)
-            case (1)
-                // --- BRAM reads ---
-                mem_valid && !mem_ready && !mem_wstrb && (mem_addr < 32'h0000_1000 || (mem_addr[31:16] == 16'h0001 && mem_addr[15:14] == 2'b00)):
-                    m_read_en <= 1;
-                // --- Peripheral reads ---
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h1000_0008:
-                    begin mem_rdata<=uart_dat_do; uart_rx_rd<=1; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h1000_000C:
-                    begin mem_rdata<={30'b0,uart_rx_valid,uart_tx_ready}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h1000_0010:
-                    begin mem_rdata<=uart_div_do; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h2000_0000:
-                    begin mem_rdata<={28'b0,sw_sync2}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h2000_0004:
-                    begin mem_rdata<={28'b0,btn_sync2}; mem_ready<=1; end
-                // SD SPI reads
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h6000_0000:
-                    begin mem_rdata<={24'd0,sdspi_rx_data_reg}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h6000_0004:
-                    begin mem_rdata<={29'd0,sdspi_cs_n_reg,sdspi_busy,sdspi_done_sticky}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h6000_0008:
-                    begin mem_rdata<={31'd0,sdspi_cs_n_reg}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h6000_000C:
-                    begin mem_rdata<={16'd0,sdspi_clkdiv}; mem_ready<=1; end
-                // TinyJAMBU reads
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_0048:
-                    begin mem_rdata<={30'd0,jb_done_sticky,jb_valid_sticky}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_004C:
-                    begin mem_rdata<=jb_data_out[31:0]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_0050:
-                    begin mem_rdata<=jb_data_out[63:32]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_0054:
-                    begin mem_rdata<=jb_data_out[95:64]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_0058:
-                    begin mem_rdata<=jb_data_out[127:96]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_005C:
-                    begin mem_rdata<=jb_tag_out[31:0]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h3000_0060:
-                    begin mem_rdata<=jb_tag_out[63:32]; mem_ready<=1; end
-                // Xoodyak reads
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0054:
-                    begin mem_rdata<={30'd0,xd_done_sticky,xd_valid_sticky}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0058:
-                    begin mem_rdata<=xd_data_out[31:0]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_005C:
-                    begin mem_rdata<=xd_data_out[63:32]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0060:
-                    begin mem_rdata<=xd_data_out[95:64]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0064:
-                    begin mem_rdata<=xd_data_out[127:96]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0068:
-                    begin mem_rdata<=xd_tag_out[31:0]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_006C:
-                    begin mem_rdata<=xd_tag_out[63:32]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0070:
-                    begin mem_rdata<=xd_tag_out[95:64]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h4000_0074:
-                    begin mem_rdata<=xd_tag_out[127:96]; mem_ready<=1; end
-                // GIFT-COFB reads
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0054:
-                    begin mem_rdata<={28'd0,gc_ad_req,gc_msg_req,gc_done_sticky,gc_valid_sticky}; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0058:
-                    begin mem_rdata<=gc_data_out[ 31: 0]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_005C:
-                    begin mem_rdata<=gc_data_out[ 63:32]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0060:
-                    begin mem_rdata<=gc_data_out[ 95:64]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0064:
-                    begin mem_rdata<=gc_data_out[127:96]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0068:
-                    begin mem_rdata<=gc_tag_out[ 31: 0]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_006C:
-                    begin mem_rdata<=gc_tag_out[ 63:32]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0070:
-                    begin mem_rdata<=gc_tag_out[ 95:64]; mem_ready<=1; end
-                mem_valid && !mem_ready && !mem_wstrb && mem_addr==32'h5000_0074:
-                    begin mem_rdata<=gc_tag_out[127:96]; mem_ready<=1; end
-                // --- WRITES ---
-                // App SRAM (Handled by macro)
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr[31:16]==16'h0001 && mem_addr[15:14] == 2'b00: begin
-                    mem_ready<=1;
-                end
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr==32'h1000_0000:
-                    begin out_byte_en<=1; out_byte<=mem_wdata[7:0]; mem_ready<=1; end
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr==32'h1000_0004: begin
-                    if (!tx_busy) begin
-                        uart_tx_data<=mem_wdata[7:0]; uart_we<=1;
-                        tx_busy<=1; tx_countdown<=16'd10500;
-                    end
-                    mem_ready<=1;
-                end
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr==32'h1000_0010:
-                    begin uart_div_we<=mem_wstrb; uart_div_di<=mem_wdata; mem_ready<=1; end
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr==32'h6000_0000: begin
-                    if (!sdspi_busy) begin sdspi_tx_data<=mem_wdata[7:0]; sdspi_start<=1; end
-                    mem_ready<=1;
-                end
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr==32'h6000_0008:
-                    begin sdspi_cs_n_reg<=mem_wdata[0]; mem_ready<=1; end
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr==32'h6000_000C:
-                    begin sdspi_clkdiv<=mem_wdata[15:0]; mem_ready<=1; end
-                // TinyJAMBU writes
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr[31:8]==24'h30_0000: begin
-                    case (mem_addr[7:0])
-                        8'h00: jb_key[31:0]<=mem_wdata;     8'h04: jb_key[63:32]<=mem_wdata;
-                        8'h08: jb_key[95:64]<=mem_wdata;    8'h0C: jb_key[127:96]<=mem_wdata;
-                        8'h10: jb_nonce[31:0]<=mem_wdata;   8'h14: jb_nonce[63:32]<=mem_wdata;
-                        8'h18: jb_nonce[95:64]<=mem_wdata;
-                        8'h1C: jb_ad[31:0]<=mem_wdata;      8'h20: jb_ad[63:32]<=mem_wdata;
-                        8'h24: jb_ad[95:64]<=mem_wdata;     8'h28: jb_ad[127:96]<=mem_wdata;
-                        8'h2C: jb_data_in[31:0]<=mem_wdata; 8'h30: jb_data_in[63:32]<=mem_wdata;
-                        8'h34: jb_data_in[95:64]<=mem_wdata;8'h38: jb_data_in[127:96]<=mem_wdata;
-                        8'h3C: jb_tag_in[31:0]<=mem_wdata;  8'h40: jb_tag_in[63:32]<=mem_wdata;
-                        8'h44: begin
-                            jb_sel_type<=mem_wdata[18:16]; jb_ad_length<=mem_wdata[12:8];
-                            jb_data_length<=mem_wdata[4:0]; jb_ena<=1;
-                        end
-                    endcase
-                    mem_ready<=1;
-                end
-                // Xoodyak writes
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr[31:8]==24'h40_0000: begin
-                    case (mem_addr[7:0])
-                        8'h00: xd_key[31:0]<=mem_wdata;      8'h04: xd_key[63:32]<=mem_wdata;
-                        8'h08: xd_key[95:64]<=mem_wdata;     8'h0C: xd_key[127:96]<=mem_wdata;
-                        8'h10: xd_nonce[31:0]<=mem_wdata;    8'h14: xd_nonce[63:32]<=mem_wdata;
-                        8'h18: xd_nonce[95:64]<=mem_wdata;   8'h1C: xd_nonce[127:96]<=mem_wdata;
-                        8'h20: xd_ad[31:0]<=mem_wdata;       8'h24: xd_ad[63:32]<=mem_wdata;
-                        8'h28: xd_ad[95:64]<=mem_wdata;      8'h2C: xd_ad[127:96]<=mem_wdata;
-                        8'h30: xd_data_in[31:0]<=mem_wdata;  8'h34: xd_data_in[63:32]<=mem_wdata;
-                        8'h38: xd_data_in[95:64]<=mem_wdata; 8'h3C: xd_data_in[127:96]<=mem_wdata;
-                        8'h40: xd_tag_in[31:0]<=mem_wdata;   8'h44: xd_tag_in[63:32]<=mem_wdata;
-                        8'h48: xd_tag_in[95:64]<=mem_wdata;  8'h4C: xd_tag_in[127:96]<=mem_wdata;
-                        8'h50: begin
-                            xd_sel_type<=mem_wdata[17:16]; xd_ad_length<=mem_wdata[12:8];
-                            xd_data_length<=mem_wdata[4:0]; xd_ena<=1;
-                        end
-                    endcase
-                    mem_ready<=1;
-                end
-                // GIFT-COFB writes
-                mem_valid && !mem_ready && |mem_wstrb && mem_addr[31:8]==24'h50_0000: begin
-                    case (mem_addr[7:0])
-                        8'h00: gc_key[ 31: 0]<=mem_wdata;  8'h04: gc_key[ 63:32]<=mem_wdata;
-                        8'h08: gc_key[ 95:64]<=mem_wdata;  8'h0C: gc_key[127:96]<=mem_wdata;
-                        8'h10: gc_nonce[ 31: 0]<=mem_wdata; 8'h14: gc_nonce[ 63:32]<=mem_wdata;
-                        8'h18: gc_nonce[ 95:64]<=mem_wdata; 8'h1C: gc_nonce[127:96]<=mem_wdata;
-                        8'h20: gc_ad[ 31: 0]<=mem_wdata;   8'h24: gc_ad[ 63:32]<=mem_wdata;
-                        8'h28: gc_ad[ 95:64]<=mem_wdata;   8'h2C: gc_ad[127:96]<=mem_wdata;
-                        8'h30: gc_data_in[ 31: 0]<=mem_wdata; 8'h34: gc_data_in[ 63:32]<=mem_wdata;
-                        8'h38: gc_data_in[ 95:64]<=mem_wdata; 8'h3C: gc_data_in[127:96]<=mem_wdata;
-                        8'h40: gc_tag_in[ 31: 0]<=mem_wdata;  8'h44: gc_tag_in[ 63:32]<=mem_wdata;
-                        8'h48: gc_tag_in[ 95:64]<=mem_wdata;  8'h4C: gc_tag_in[127:96]<=mem_wdata;
-                        8'h50: begin
-                            gc_decrypt_mode<=mem_wdata[16]; gc_ad_length<=mem_wdata[15:8];
-                            gc_data_length<=mem_wdata[7:0]; gc_start<=1;
-                        end
-                        8'h78: begin gc_ad_ack<=mem_wdata[1]; gc_msg_ack<=mem_wdata[0]; end
-                    endcase
-                    mem_ready<=1;
-                end
-
-                default: ;
-            endcase
-        end // always
-
+        end
     end
-    endgenerate
 
 endmodule
-

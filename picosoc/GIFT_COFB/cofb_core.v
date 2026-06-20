@@ -1,6 +1,6 @@
 // ============================================================
-// COFB CORE - Multi-block FSM (khớp encrypt.c)
-// Giao diện req/ack handshake cho multi-block AD và MSG
+// COFB CORE - Multi-block FSM (matching encrypt.c)
+// Req/ack handshake interface for multi-block AD and MSG
 // ============================================================
 
 module cofb_core (
@@ -14,28 +14,28 @@ module cofb_core (
 
     // ---- AD streaming input ----
     input  wire [127:0] ad_data,
-    input  wire [7:0]   ad_total_len,   // Tổng số byte AD (0..255)
-    input  wire         ad_ack,         // User: block mới đã ổn định trên ad_data
+    input  wire [7:0]   ad_total_len,   // Total AD bytes (0..255)
+    input  wire         ad_ack,         // User: new block is stable on ad_data
 
     // ---- MSG streaming input ----
     input  wire [127:0] msg_data,
-    input  wire [7:0]   msg_total_len,  // Tổng số byte MSG (0..255)
-    input  wire         msg_ack,        // User: block mới đã ổn định trên msg_data
+    input  wire [7:0]   msg_total_len,  // Total MSG bytes (0..255)
+    input  wire         msg_ack,        // User: new block is stable on msg_data
 
-    // ---- Decrypt: tag cần kiểm tra ----
+    // ---- Decrypt: tag to check ----
     input  wire [127:0] tag_in,
 
     // ---- Handshake outputs ----
-    output reg          ad_req,         // Core đang chờ block AD tiếp theo
-    output reg          msg_req,        // Core đang chờ block MSG tiếp theo
+    output reg          ad_req,         // Core is waiting for the next AD block
+    output reg          msg_req,        // Core is waiting for the next MSG block
 
     // ---- Output streaming ----
     output reg  [127:0] data_out,
     output reg          data_out_valid,
 
-    // ---- Kết quả cuối ----
+    // ---- Final results ----
     output reg  [127:0] tag_out,
-    output reg          valid,          // Decrypt: 1 nếu tag khớp; Encrypt: luôn 1
+    output reg          valid,          // Decrypt: 1 if tag matches; Encrypt: always 1
     output reg          done
 );
 
@@ -61,7 +61,7 @@ module cofb_core (
     reg         is_last_msg;
 
     // ----------------------------------------------------------
-    // Tín hiệu tổ hợp
+    // Combinational signals
     // ----------------------------------------------------------
     wire [4:0] ad_bytes  = (remaining_ad  > 8'd16) ? 5'd16 : remaining_ad[4:0];
     wire [4:0] msg_bytes = (remaining_msg > 8'd16) ? 5'd16 : remaining_msg[4:0];
@@ -77,7 +77,7 @@ module cofb_core (
     wire partial_msg = (remaining_msg != 8'd0) &&
                        (remaining_msg[3:0] != 4'd0);
 
-    // emptyM: dùng tổng length gốc (input port, bất biến)
+    // emptyM: use original total length (input port, invariant)
     wire emptyM = (msg_total_len == 8'd0);
 
     // ----------------------------------------------------------
@@ -88,13 +88,37 @@ module cofb_core (
     reg          gift_start;
     wire         gift_done;
 
-    wire [127:0] pho_C,  pho_X;
-    wire [127:0] phop_M, phop_X;
     wire [127:0] pho1_AD_X;
     wire [127:0] gift_in_with_offset;
 
     // ----------------------------------------------------------
-    // Chuỗi offset: L → 2L / 3L / 9L / 27L / 81L
+    // Shared MSG processing (replaces separate pho + phoprime)
+    // Both compute partial_xor(Y,input) and pho1(Y,M,bytes).
+    // Encrypt: out_data=C=xor(Y,M), X=pho1(Y, M)
+    // Decrypt: out_data=M=xor(Y,C), X=pho1(Y, M=xor(Y,C))
+    // ----------------------------------------------------------
+    wire [127:0] msg_xor_out;   // C (encrypt) or M (decrypt)
+    wire [127:0] msg_pho1_X;    // chaining value for both modes
+
+    xor_block u_msg_xor (
+        .s1          (Y_prev),
+        .s2          (msg_data),
+        .no_of_bytes (msg_bytes),
+        .d           (msg_xor_out)
+    );
+
+    // pho1 M input: encrypt uses msg_data, decrypt uses msg_xor_out
+    wire [127:0] pho1_msg_m_in = decrypt_mode ? msg_xor_out : msg_data;
+
+    pho1 u_pho1_msg (
+        .Y_in        (Y_prev),
+        .M_in        (pho1_msg_m_in),
+        .no_of_bytes (msg_bytes),
+        .d           (msg_pho1_X)
+    );
+
+    // ----------------------------------------------------------
+    // Offset sequence: L → 2L / 3L / 9L / 27L / 81L
     // ----------------------------------------------------------
     wire [63:0] L_dbl;
     wire [63:0] L_tri;
@@ -113,22 +137,6 @@ module cofb_core (
         .M_in        (ad_data),
         .no_of_bytes (ad_bytes),
         .d           (pho1_AD_X)
-    );
-
-    pho u_pho_msg (
-        .Y           (Y_prev),
-        .M           (msg_data),
-        .no_of_bytes (msg_bytes),
-        .C           (pho_C),
-        .X           (pho_X)
-    );
-
-    phoprime u_phop_msg (
-        .Y           (Y_prev),
-        .C           (msg_data),
-        .no_of_bytes (msg_bytes),
-        .M           (phop_M),
-        .X           (phop_X)
     );
 
     xor_topbar_block u_offset_xor (
@@ -268,15 +276,9 @@ module cofb_core (
                         else              L <= L_tri2;
                     end
 
-                    if (!decrypt_mode) begin
-                        data_out       <= pho_C;
-                        data_out_valid <= 1'b1;
-                        gift_in        <= pho_X;
-                    end else begin
-                        data_out       <= phop_M;
-                        data_out_valid <= 1'b1;
-                        gift_in        <= phop_X;
-                    end
+                    data_out       <= msg_xor_out;
+                    data_out_valid <= 1'b1;
+                    gift_in        <= msg_pho1_X;
 
                     gift_start <= 1'b1;
                     state      <= S_WAIT_MSG;

@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 module xor_topbar_block (
     input  [127:0] s1,      // Input block (128-bit)
     input  [63:0]  s2,      // Half block (64-bit) - top bar

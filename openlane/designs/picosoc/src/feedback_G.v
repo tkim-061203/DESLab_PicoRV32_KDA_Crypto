@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 module feedback_G (
     input  [127:0] Y_in,
     output [127:0] G_out

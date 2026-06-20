@@ -1,31 +1,326 @@
 // =============================================================================
-// tinyjambu_core.v — TinyJAMBU AEAD Core (Maximum Area Optimization)
+//  tinyjambu_paper_32.v  (tối ưu LUT)
+//  TinyJAMBU-128 — Kiến trúc 4 khối, controller gọn
 //
-// Architecture: 3-module decomposition with shared barrel shifter
-//   - tinyjambu_nlfsr: NLFSR permutation engine with XOR-delta interface
-//   - tinyjambu_fsm: FSM controller (outputs XOR deltas, not full values)
-//   - tinyjambu_datapath: Data processing with ONE shared barrel shifter
-//
-// Area savings vs original monolithic (1495 LUTs, 932 FFs):
-//   - Shared barrel shifter:     -400 to -600 LUTs (2 of 3 shifters eliminated)
-//   - XOR-delta NLFSR interface: -50  to -100 LUTs (no w0/w1/w3 feedback bus)
-//   - Bit-concat shift amount:   -50  to -100 LUTs (no multiplier)
-//   - Direct output accumulate:  -128 FFs
-//   Expected: ~800-1000 LUTs, ~800 FFs
-//
-// Latency: +2 cycles (serialized AD/DATA latch), negligible vs permutation
-// Interface: Drop-in compatible with original tinyjambu_core
+//  Tối ưu so với bản trước:
+//   - Controller expose state[3:0] trực tiếp, bỏ phase_out + word_sel
+//   - Chuyển num_ad/data_words, ad/data_vb, data MUX ra top module
+//   - Top module dùng state trực tiếp chọn dữ liệu (giống code gốc)
 // =============================================================================
 `timescale 1ns/1ps
 
-module tinyjambu_core (
+// FSM states (dùng chung)
+`define S_IDLE          4'd0
+`define S_LD_INIT_STATE 4'd1
+`define S_LOAD_KEY      4'd2
+`define S_INIT_KEY      4'd3
+`define S_WAIT_NPUB     4'd4
+`define S_LD_NPUB       4'd5
+`define S_LD_NPUB_1     4'd6
+`define S_WAIT_BDI      4'd7
+`define S_PROC_AD_0     4'd8
+`define S_PROC_AD_1     4'd9
+`define S_PROC_PT_0     4'd10
+`define S_PROC_PT_1     4'd11
+`define S_FINAL         4'd12
+`define S_FINAL2        4'd13
+`define S_FINAL3        4'd14
+`define S_DONE          4'd15
+
+// =============================================================================
+// KHỐI 1: NLFSR 32-bit
+// =============================================================================
+module tinyjambu_nlfsr_32 (
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         en,
+    input  wire [1:0]   sel,
+    input  wire         frame_en,
+    input  wire [31:0]  absorb_data,
+    input  wire [2:0]   frame_bits,
+    input  wire [1:0]   len_val,
+    input  wire [31:0]  key_word,
+    output wire [127:0] s_out,
+    output wire [31:0]  u_word
+);
+    reg [127:0] s;
+
+    assign u_word = s[122:91]
+                  ^ (~(s[116:85] & s[101:70]))
+                  ^ s[78:47]
+                  ^ s[31:0]
+                  ^ key_word;
+
+    wire [31:0] word_in =
+        (sel == 2'b11) ? 32'h0        :
+        (sel == 2'b10) ? absorb_data  : u_word;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            s <= 128'h0;
+        end else if (en) begin
+            s[127:96] <= word_in;
+            s[95:0]   <= s[127:32];
+        end else if (frame_en) begin
+            s[38:36] <= s[38:36] ^ frame_bits;
+            s[33:32] <= s[33:32] ^ len_val;
+        end
+    end
+
+    assign s_out = s;
+endmodule
+
+// =============================================================================
+// KHỐI 2: KeyReg 32-bit
+// =============================================================================
+module tinyjambu_keyreg_32 (
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         load_en,
+    input  wire         shift_en,
+    input  wire [127:0] key_data,
+    output wire [31:0]  key_word
+);
+    reg [127:0] key_reg;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)          key_reg <= 128'h0;
+        else if (load_en)    key_reg <= key_data;
+        else if (shift_en)   key_reg <= {key_reg[31:0], key_reg[127:32]};
+    end
+
+    assign key_word = key_reg[31:0];
+endmodule
+
+// =============================================================================
+// KHỐI 3: Comb 32-bit
+// =============================================================================
+module tinyjambu_comb_32 (
+    input  wire [127:0] s,
+    input  wire [31:0]  u_word,
+    input  wire [31:0]  data_le,
+    input  wire         decrypt,
+    input  wire [3:0]   valid_bytes,
+    input  wire         is_pt_phase,
+    output wire [31:0]  new_st,
+    output wire [31:0]  out_word_le,
+    output wire [31:0]  tag_word
+);
+    wire [31:0] xor_out = s[127:96] ^ data_le;
+
+    wire [31:0] xor_filt = {
+        xor_out[31:24] & {8{valid_bytes[0]}},
+        xor_out[23:16] & {8{valid_bytes[1]}},
+        xor_out[15:8]  & {8{valid_bytes[2]}},
+        xor_out[7:0]   & {8{valid_bytes[3]}}
+    };
+
+    assign out_word_le = xor_filt;
+    wire [31:0] in_word = (decrypt && is_pt_phase) ? xor_filt : data_le;
+    assign new_st  = u_word ^ in_word;
+    assign tag_word = s[127:96];
+endmodule
+
+// =============================================================================
+// KHỐI 4: Controller gọn
+//   - Bỏ phase_out, word_sel, num_ad/data_words, ad/data_vb
+//   - Expose state_out + counters
+//   - Nhận num_ad/data_words, ad/data_vb từ top
+// =============================================================================
+module tinyjambu_ctrl_32 (
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         ena,
+    input  wire         decrypt_in,
+    input  wire [2:0]   num_ad_words,
+    input  wire [2:0]   num_data_words,
+    input  wire [1:0]   ad_vb_in,
+    input  wire [1:0]   data_vb_in,
+    input  wire         tag_mismatch,
+    // NLFSR
+    output reg          nlfsr_en,
+    output reg  [1:0]   nlfsr_sel,
+    output reg          nlfsr_frame,
+    output reg  [2:0]   frame_bits,
+    output reg  [1:0]   len_val_out,
+    // KeyReg
+    output reg          key_load,
+    output reg          key_shift,
+    // Tag
+    output reg          capture_tag,
+    output reg  [1:0]   tag_half,
+    // Expose
+    output wire [3:0]   state_out,
+    output reg          decrypt_r,
+    output reg          done_o,
+    output reg          valid_o,
+    output wire [1:0]   npub_cnt_out,
+    output wire [1:0]   ad_cnt_out,
+    output wire [1:0]   data_cnt_out
+);
+
+    reg [3:0]  state, nstate;
+    reg [5:0]  ctr;
+    reg [1:0]  npub_cnt;
+    reg [2:0]  ad_cnt;
+    reg [2:0]  data_cnt;
+    reg        auth_fail;
+    reg [1:0]  len_val_r;
+    reg        rst_ctr, en_ctr, en_len;
+    reg [1:0]  nlen;
+
+    assign state_out    = state;
+    assign npub_cnt_out = npub_cnt;
+    assign ad_cnt_out   = ad_cnt[1:0];
+    assign data_cnt_out = data_cnt[1:0];
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) state <= `S_IDLE;
+        else        state <= nstate;
+    end
+
+    always @(*) begin
+        nstate      = state;
+        rst_ctr     = 1'b0;  en_ctr      = 1'b0;
+        nlfsr_en    = 1'b0;  nlfsr_sel   = 2'b00;
+        nlfsr_frame = 1'b0;  frame_bits  = 3'b000;
+        len_val_out = 2'b00;
+        key_load    = 1'b0;  key_shift   = 1'b0;
+        capture_tag = 1'b0;  tag_half    = 2'b00;
+        en_len      = 1'b0;  nlen        = 2'b00;
+
+        case (state)
+            `S_IDLE: if (ena) begin nstate = `S_LD_INIT_STATE; rst_ctr = 1'b1; end
+
+            `S_LD_INIT_STATE: begin
+                nlfsr_sel = 2'b11; nlfsr_en = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd3) begin nstate = `S_LOAD_KEY; rst_ctr = 1'b1; end
+            end
+
+            `S_LOAD_KEY: begin key_load = 1'b1; nstate = `S_INIT_KEY; rst_ctr = 1'b1; end
+
+            `S_INIT_KEY: begin
+                nlfsr_en = 1'b1; key_shift = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd31) nstate = `S_WAIT_NPUB;
+            end
+
+            `S_WAIT_NPUB: begin
+                if (npub_cnt != 2'd3) begin
+                    nlfsr_frame = 1'b1; frame_bits = 3'b001;
+                    rst_ctr = 1'b1; nstate = `S_LD_NPUB;
+                end else nstate = `S_WAIT_BDI;
+            end
+
+            `S_LD_NPUB: begin
+                nlfsr_en = 1'b1; key_shift = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd18) nstate = `S_LD_NPUB_1;
+            end
+
+            `S_LD_NPUB_1: begin
+                nlfsr_sel = 2'b10; nlfsr_en = 1'b1; key_shift = 1'b1;
+                en_ctr = 1'b1; nstate = `S_WAIT_NPUB;
+            end
+
+            `S_WAIT_BDI: begin
+                rst_ctr = 1'b1;
+                if (ad_cnt < num_ad_words) begin
+                    nlfsr_frame = 1'b1; frame_bits = 3'b011;
+                    len_val_out = len_val_r; nstate = `S_PROC_AD_0;
+                end else if (data_cnt < num_data_words) begin
+                    nlfsr_frame = 1'b1; frame_bits = 3'b101;
+                    len_val_out = len_val_r; nstate = `S_PROC_PT_0;
+                end else begin
+                    nlfsr_frame = 1'b1; frame_bits = 3'b111;
+                    len_val_out = len_val_r;
+                    en_len = 1'b1; nlen = 2'b00; nstate = `S_FINAL;
+                end
+            end
+
+            `S_PROC_AD_0: begin
+                nlfsr_en = 1'b1; key_shift = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd18) nstate = `S_PROC_AD_1;
+            end
+
+            `S_PROC_AD_1: begin
+                nlfsr_sel = 2'b10; nlfsr_en = 1'b1; key_shift = 1'b1;
+                en_ctr = 1'b1; en_len = 1'b1; nlen = ad_vb_in;
+                nstate = `S_WAIT_BDI;
+            end
+
+            `S_PROC_PT_0: begin
+                nlfsr_en = 1'b1; key_shift = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd30) nstate = `S_PROC_PT_1;
+            end
+
+            `S_PROC_PT_1: begin
+                nlfsr_sel = 2'b10; nlfsr_en = 1'b1; key_shift = 1'b1;
+                en_ctr = 1'b1; en_len = 1'b1; nlen = data_vb_in;
+                nstate = `S_WAIT_BDI;
+            end
+
+            `S_FINAL: begin
+                nlfsr_en = 1'b1; key_shift = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd31) begin
+                    capture_tag = 1'b1; tag_half = 2'b01; nstate = `S_FINAL2;
+                end
+            end
+
+            `S_FINAL2: begin
+                nlfsr_frame = 1'b1; frame_bits = 3'b111;
+                rst_ctr = 1'b1; nstate = `S_FINAL3;
+            end
+
+            `S_FINAL3: begin
+                nlfsr_en = 1'b1; key_shift = 1'b1; en_ctr = 1'b1;
+                if (ctr == 6'd19) begin
+                    capture_tag = 1'b1; tag_half = 2'b10;
+                    nstate = `S_DONE; rst_ctr = 1'b1;
+                end
+            end
+
+            `S_DONE: nstate = `S_IDLE;
+            default: nstate = `S_IDLE;
+        endcase
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            ctr <= 6'd0; npub_cnt <= 2'd0; ad_cnt <= 3'd0; data_cnt <= 3'd0;
+            decrypt_r <= 1'b0; auth_fail <= 1'b0; len_val_r <= 2'b00;
+            done_o <= 1'b0; valid_o <= 1'b0;
+        end else begin
+            done_o <= 1'b0; valid_o <= 1'b0;
+
+            if (state == `S_IDLE && nstate == `S_LD_INIT_STATE) begin
+                decrypt_r <= decrypt_in; auth_fail <= 1'b0;
+                npub_cnt <= 2'd0; ad_cnt <= 3'd0; data_cnt <= 3'd0;
+                len_val_r <= 2'b00;
+            end
+
+            if (rst_ctr) ctr <= 6'd0; else if (en_ctr) ctr <= ctr + 6'd1;
+            if (en_len) len_val_r <= nlen;
+
+            if (state == `S_LD_NPUB_1)  npub_cnt <= npub_cnt + 2'd1;
+            if (state == `S_PROC_AD_1)  ad_cnt   <= ad_cnt + 3'd1;
+            if (state == `S_PROC_PT_1)  data_cnt <= data_cnt + 3'd1;
+
+            if (capture_tag && decrypt_r && tag_mismatch) auth_fail <= 1'b1;
+
+            if (state == `S_DONE) begin done_o <= 1'b1; valid_o <= ~auth_fail; end
+        end
+    end
+endmodule
+
+// =============================================================================
+// KHỐI 5: Top — dùng state trực tiếp (giống code gốc)
+// =============================================================================
+module tinyjambu_core(
 `ifdef USE_POWER_PINS
-    inout wire          VPWR,
-    inout wire          VGND,
+    inout VPWR,
+    inout VGND,
 `endif
     input  wire         clk,
     input  wire         rst_n,
-
     input  wire         ena,
     input  wire [2:0]   sel_type,
     input  wire [127:0] key,
@@ -35,139 +330,159 @@ module tinyjambu_core (
     input  wire [4:0]   data_length,
     input  wire [127:0] data_in,
     input  wire [63:0]  tag_in,
-
-    output wire         valid,
-    output wire [63:0]  tag,
-    output wire [127:0] data_out,
-    output wire         done
+    output reg          valid,
+    output reg  [63:0]  tag,
+    output reg  [127:0] data_out,
+    output reg          done
 );
+    function [31:0] bswap32;
+        input [31:0] x;
+        bswap32 = {x[7:0], x[15:8], x[23:16], x[31:24]};
+    endfunction
 
-  // ─── Internal wires: FSM ↔ NLFSR ─────────────────────────────────────────
-  wire        nlfsr_init, nlfsr_run;
-  wire        nlfsr_wr_w1, nlfsr_wr_w3;
-  wire [31:0] nlfsr_w1_xor, nlfsr_w3_xor;
-  wire [31:0] w2_out;
+    // Dây nối
+    wire        nlfsr_en, nlfsr_frame, key_load_en, key_shift_en;
+    wire [1:0]  nlfsr_sel;
+    wire [2:0]  ctrl_frame_bits;
+    wire [1:0]  ctrl_len_val;
+    wire        ctrl_cap_tag, ctrl_decrypt, ctrl_done, ctrl_valid;
+    wire [1:0]  ctrl_tag_half;
+    wire [3:0]  st;
+    wire [1:0]  npub_cnt, ad_cnt, data_cnt;
+    wire [127:0] s_state;
+    wire [31:0]  u_word, key_word;
+    wire [31:0]  new_st, comb_out_le, comb_tag_word;
 
-  // ─── Internal wires: FSM ↔ Datapath ──────────────────────────────────────
-  wire        dp_latch, dp_latch_ad, dp_latch_dat;
-  wire [1:0]  dp_key_idx, dp_nonce_idx, dp_ad_idx, dp_data_idx;
-  wire        dp_out_wr;
-  wire [1:0]  dp_out_idx;
-  wire [31:0] dp_out_word;
-  wire        dp_finalize, dp_tag_wr;
-  wire [31:0] dp_tag_lo, dp_tag_hi;
+    // --- Tính toán (đã chuyển ra từ controller) ---
+    wire [2:0] num_ad_words =
+        (ad_length == 5'd0) ? 3'd0 : (ad_length <= 5'd4) ? 3'd1 :
+        (ad_length <= 5'd8) ? 3'd2 : (ad_length <= 5'd12) ? 3'd3 : 3'd4;
 
-  wire [31:0] key_word, nonce_word, ad_word, data_word;
-  wire [2:0]  ad_words_w, data_words_w;
-  wire [1:0]  ad_partial_w, data_partial_w;
-  wire [31:0] ad_mask_w, data_mask_w;
-  wire [2:0]  mode_w;
+    wire [2:0] num_data_words =
+        (data_length == 5'd0) ? 3'd0 : (data_length <= 5'd4) ? 3'd1 :
+        (data_length <= 5'd8) ? 3'd2 : (data_length <= 5'd12) ? 3'd3 : 3'd4;
 
-  // ─── NLFSR (uses existing optimized module) ───────────────────────────────
-  tinyjambu_nlfsr u_nlfsr (
-      .clk        (clk),
-      .rst_n      (rst_n),
-      .i_init     (nlfsr_init),
-      .i_run      (nlfsr_run),
-      .i_key_word (key_word),
-      .i_wr_w1    (nlfsr_wr_w1),
-      .i_w1_xor   (nlfsr_w1_xor),
-      .i_wr_w3    (nlfsr_wr_w3),
-      .i_w3_xor   (nlfsr_w3_xor),
-      .o_w2       (w2_out)
-  );
+    wire [4:0] ad_rem   = ad_length   - {1'b0, ad_cnt,   2'b00};
+    wire [4:0] data_rem = data_length - {1'b0, data_cnt, 2'b00};
+    wire [2:0] ad_vb    = (ad_rem   >= 5'd4) ? 3'd4 : ad_rem[2:0];
+    wire [2:0] data_vb  = (data_rem >= 5'd4) ? 3'd4 : data_rem[2:0];
 
-  // ─── FSM (with serialized latch states) ───────────────────────────────────
-  tinyjambu_fsm u_fsm (
-      .clk            (clk),
-      .rst_n          (rst_n),
-      .i_ena          (ena),
-      .o_done         (done),
-      // NLFSR control
-      .o_nlfsr_init   (nlfsr_init),
-      .o_nlfsr_run    (nlfsr_run),
-      .o_nlfsr_wr_w1  (nlfsr_wr_w1),
-      .o_nlfsr_w1_xor (nlfsr_w1_xor),
-      .o_nlfsr_wr_w3  (nlfsr_wr_w3),
-      .o_nlfsr_w3_xor (nlfsr_w3_xor),
-      .i_w2           (w2_out),
-      // Datapath control
-      .o_dp_latch     (dp_latch),
-      .o_dp_latch_ad  (dp_latch_ad),
-      .o_dp_latch_dat (dp_latch_dat),
-      .o_dp_key_idx   (dp_key_idx),
-      .o_dp_nonce_idx (dp_nonce_idx),
-      .o_dp_ad_idx    (dp_ad_idx),
-      .o_dp_data_idx  (dp_data_idx),
-      .o_dp_out_wr    (dp_out_wr),
-      .o_dp_out_idx   (dp_out_idx),
-      .o_dp_out_word  (dp_out_word),
-      .o_dp_finalize  (dp_finalize),
-      .o_dp_tag_wr    (dp_tag_wr),
-      .o_dp_tag_lo    (dp_tag_lo),
-      .o_dp_tag_hi    (dp_tag_hi),
-      // Datapath data
-      .i_dp_key_word     (key_word),
-      .i_dp_nonce_word   (nonce_word),
-      .i_dp_ad_word      (ad_word),
-      .i_dp_data_word    (data_word),
-      .i_dp_ad_words     (ad_words_w),
-      .i_dp_data_words   (data_words_w),
-      .i_dp_ad_partial   (ad_partial_w),
-      .i_dp_data_partial (data_partial_w),
-      .i_dp_ad_mask      (ad_mask_w),
-      .i_dp_data_mask    (data_mask_w),
-      .i_dp_mode         (mode_w)
-  );
+    // --- Khóa (thứ tự đảo, khớp shift-load gốc) ---
+    wire [127:0] key_le = {
+        bswap32(key[31:0]), bswap32(key[63:32]),
+        bswap32(key[95:64]), bswap32(key[127:96])
+    };
 
-  // ─── Datapath (shared barrel shifter version) ─────────────────────────────
-  tinyjambu_datapath u_dp (
-      .clk           (clk),
-      .rst_n         (rst_n),
-      // Raw inputs
-      .i_key         (key),
-      .i_nonce       (nonce),
-      .i_ad          (ad),
-      .i_ad_length   (ad_length),
-      .i_data_in     (data_in),
-      .i_data_length (data_length),
-      .i_tag_in      (tag_in),
-      .i_sel_type    (sel_type),
-      // Latch control (serialized: latch_all → latch_ad → latch_dat)
-      .i_latch       (dp_latch),
-      .i_latch_ad    (dp_latch_ad),
-      .i_latch_dat   (dp_latch_dat),
-      // Word selection
-      .i_key_idx     (dp_key_idx),
-      .i_nonce_idx   (dp_nonce_idx),
-      .i_ad_idx      (dp_ad_idx),
-      .i_data_idx    (dp_data_idx),
-      // Word outputs
-      .o_key_word    (key_word),
-      .o_nonce_word  (nonce_word),
-      .o_ad_word     (ad_word),
-      .o_data_word   (data_word),
-      // Properties
-      .o_ad_words    (ad_words_w),
-      .o_data_words  (data_words_w),
-      .o_ad_partial  (ad_partial_w),
-      .o_data_partial(data_partial_w),
-      .o_ad_mask     (ad_mask_w),
-      .o_data_mask   (data_mask_w),
-      .o_mode        (mode_w),
-      // Output accumulation
-      .i_out_wr      (dp_out_wr),
-      .i_out_idx     (dp_out_idx),
-      .i_out_word    (dp_out_word),
-      .i_finalize    (dp_finalize),
-      // Tag
-      .i_tag_wr      (dp_tag_wr),
-      .i_tag_lo      (dp_tag_lo),
-      .i_tag_hi      (dp_tag_hi),
-      // Final outputs
-      .o_data_out    (data_out),
-      .o_tag         (tag),
-      .o_valid       (valid)
-  );
+    // --- Chọn dữ liệu trực tiếp từ state (giống code gốc) ---
+    wire [31:0] npub_word_be =
+        (npub_cnt == 2'd0) ? nonce[95:64] :
+        (npub_cnt == 2'd1) ? nonce[63:32] : nonce[31:0];
 
+    wire [31:0] ad_word_be =
+        (ad_cnt == 2'd0) ? ad[127:96] : (ad_cnt == 2'd1) ? ad[95:64] :
+        (ad_cnt == 2'd2) ? ad[63:32]  : ad[31:0];
+
+    wire [31:0] data_word_be =
+        (data_cnt == 2'd0) ? data_in[127:96] : (data_cnt == 2'd1) ? data_in[95:64] :
+        (data_cnt == 2'd2) ? data_in[63:32]  : data_in[31:0];
+
+    // bdi: chọn theo state trực tiếp
+    wire [31:0] bdi_be =
+        (st == `S_LD_NPUB_1) ? npub_word_be :
+        (st == `S_PROC_AD_1) ? ad_word_be   :
+        (st == `S_PROC_PT_1) ? data_word_be : 32'h0;
+
+    wire [2:0] cur_vb =
+        (st == `S_PROC_AD_1) ? ad_vb  :
+        (st == `S_PROC_PT_1) ? data_vb : 3'd4;
+
+    wire [31:0] bdi_be_msk =
+        (cur_vb >= 3'd4) ? bdi_be :
+        (cur_vb == 3'd3) ? {bdi_be[31:8],  8'h00} :
+        (cur_vb == 3'd2) ? {bdi_be[31:16], 16'h0000} :
+        (cur_vb == 3'd1) ? {bdi_be[31:24], 24'h000000} : 32'h0;
+
+    wire [31:0] bdi_le = bswap32(bdi_be_msk);
+
+    wire [3:0] data_vbm = {data_vb >= 3'd1, data_vb >= 3'd2,
+                           data_vb >= 3'd3, data_vb >= 3'd4};
+    wire [3:0] comb_vbm = (st == `S_PROC_PT_1) ? data_vbm : 4'hF;
+
+    wire is_pt    = (st == `S_PROC_PT_1);
+    wire cap_out  = (st == `S_PROC_PT_1);
+    wire [1:0] word_idx =
+        (st == `S_LD_NPUB || st == `S_LD_NPUB_1) ? npub_cnt :
+        (st == `S_PROC_AD_0 || st == `S_PROC_AD_1) ? ad_cnt : data_cnt;
+
+    // --- Tag compare ---
+    wire [31:0] tag_rx0_le = bswap32(tag_in[63:32]);
+    wire [31:0] tag_rx1_le = bswap32(tag_in[31:0]);
+    wire tag_mismatch =
+        (ctrl_tag_half == 2'b01) ? (comb_tag_word != tag_rx0_le) :
+        (ctrl_tag_half == 2'b10) ? (comb_tag_word != tag_rx1_le) : 1'b0;
+
+    // --- Instances ---
+    tinyjambu_nlfsr_32 u_nlfsr (
+        .clk(clk), .rst_n(rst_n), .en(nlfsr_en), .sel(nlfsr_sel),
+        .frame_en(nlfsr_frame), .absorb_data(new_st),
+        .frame_bits(ctrl_frame_bits), .len_val(ctrl_len_val),
+        .key_word(key_word), .s_out(s_state), .u_word(u_word)
+    );
+
+    tinyjambu_keyreg_32 u_keyreg (
+        .clk(clk), .rst_n(rst_n), .load_en(key_load_en),
+        .shift_en(key_shift_en), .key_data(key_le), .key_word(key_word)
+    );
+
+    tinyjambu_comb_32 u_comb (
+        .s(s_state), .u_word(u_word), .data_le(bdi_le),
+        .decrypt(ctrl_decrypt), .valid_bytes(comb_vbm),
+        .is_pt_phase(is_pt), .new_st(new_st),
+        .out_word_le(comb_out_le), .tag_word(comb_tag_word)
+    );
+
+    tinyjambu_ctrl_32 u_ctrl (
+        .clk(clk), .rst_n(rst_n), .ena(ena), .decrypt_in(sel_type[0]),
+        .num_ad_words(num_ad_words), .num_data_words(num_data_words),
+        .ad_vb_in(ad_vb[1:0]), .data_vb_in(data_vb[1:0]),
+        .tag_mismatch(tag_mismatch),
+        .nlfsr_en(nlfsr_en), .nlfsr_sel(nlfsr_sel),
+        .nlfsr_frame(nlfsr_frame), .frame_bits(ctrl_frame_bits),
+        .len_val_out(ctrl_len_val),
+        .key_load(key_load_en), .key_shift(key_shift_en),
+        .capture_tag(ctrl_cap_tag), .tag_half(ctrl_tag_half),
+        .state_out(st), .decrypt_r(ctrl_decrypt),
+        .done_o(ctrl_done), .valid_o(ctrl_valid),
+        .npub_cnt_out(npub_cnt), .ad_cnt_out(ad_cnt), .data_cnt_out(data_cnt)
+    );
+
+    // --- Output registers ---
+    reg [31:0] tag_w0_r;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            data_out <= 128'h0; tag <= 64'h0; tag_w0_r <= 32'h0;
+            done <= 1'b0; valid <= 1'b0;
+        end else begin
+            done <= 1'b0; valid <= 1'b0;
+
+            if (cap_out) begin
+                case (word_idx)
+                    2'd0: data_out[127:96] <= bswap32(comb_out_le);
+                    2'd1: data_out[95:64]  <= bswap32(comb_out_le);
+                    2'd2: data_out[63:32]  <= bswap32(comb_out_le);
+                    2'd3: data_out[31:0]   <= bswap32(comb_out_le);
+                endcase
+            end
+
+            if (ctrl_cap_tag) begin
+                if (ctrl_tag_half == 2'b01 && !ctrl_decrypt)
+                    tag_w0_r <= comb_tag_word;
+                if (ctrl_tag_half == 2'b10 && !ctrl_decrypt)
+                    tag <= {bswap32(tag_w0_r), bswap32(comb_tag_word)};
+            end
+
+            if (ctrl_done) begin done <= 1'b1; valid <= ctrl_valid; end
+        end
+    end
 endmodule

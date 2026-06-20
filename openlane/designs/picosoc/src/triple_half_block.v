@@ -1,4 +1,3 @@
-`timescale 1ns / 1ps
 module triple_half_block (
     input  [63:0] s,
     output [63:0] d

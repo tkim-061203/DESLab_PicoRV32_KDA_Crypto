@@ -1,7 +1,7 @@
 Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2024 Advanced Micro Devices, Inc. All Rights Reserved.
 ---------------------------------------------------------------------------------------------------------------------------------------------
 | Tool Version : Vivado v.2024.2 (lin64) Build 5239630 Fri Nov 08 22:34:34 MST 2024
-| Date         : Sat Mar 14 12:33:18 2026
+| Date         : Mon Jun  8 16:14:49 2026
 | Host         : minhanh-VMware-Virtual-Platform running 64-bit Ubuntu 24.04.3 LTS
 | Command      : report_utilization -hierarchical -hierarchical_depth 3 -file report_util_full.txt
 | Design       : system
@@ -19,30 +19,26 @@ Table of Contents
 1. Utilization by Hierarchy
 ---------------------------
 
-+------------------+---------------------+------------+------------+---------+------+------+--------+--------+------------+
-|     Instance     |        Module       | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs | RAMB36 | RAMB18 | DSP Blocks |
-+------------------+---------------------+------------+------------+---------+------+------+--------+--------+------------+
-| system           |               (top) |      15808 |       7572 |    8236 |    0 | 6255 |      0 |      0 |          0 |
-|   (system)       |               (top) |       8197 |          5 |    8192 |    0 | 2044 |      0 |      0 |          0 |
-|   picorv32_core  |            picorv32 |       2620 |       2576 |      44 |    0 |  527 |      0 |      0 |          0 |
-|   u_giftcofb     |           cofb_core |       1457 |       1457 |       0 |    0 |  996 |      0 |      0 |          0 |
-|     (u_giftcofb) |           cofb_core |        741 |        741 |       0 |    0 |  604 |      0 |      0 |          0 |
-|     u_gift       | gift128_encrypt_top |        470 |        470 |       0 |    0 |  392 |      0 |      0 |          0 |
-|     u_pho_msg    |                 pho |        120 |        120 |       0 |    0 |    0 |      0 |      0 |          0 |
-|       pho1_inst  |              pho1_0 |        120 |        120 |       0 |    0 |    0 |      0 |      0 |          0 |
-|     u_phop_msg   |            phoprime |        127 |        127 |       0 |    0 |    0 |      0 |      0 |          0 |
-|       pho1_inst  |                pho1 |        127 |        127 |       0 |    0 |    0 |      0 |      0 |          0 |
-|     u_tri2       |   triple_half_block |          1 |          1 |       0 |    0 |    0 |      0 |      0 |          0 |
-|   u_jambu        |      tinyjambu_core |       1140 |       1140 |       0 |    0 |  939 |      0 |      0 |          0 |
-|     u_dp         |  tinyjambu_datapath |        311 |        311 |       0 |    0 |  753 |      0 |      0 |          0 |
-|     u_fsm        |       tinyjambu_fsm |        711 |        711 |       0 |    0 |   58 |      0 |      0 |          0 |
-|     u_nlfsr      |     tinyjambu_nlfsr |        118 |        118 |       0 |    0 |  128 |      0 |      0 |          0 |
-|   u_sdspi        |   simple_spi_master |         61 |         61 |       0 |    0 |   46 |      0 |      0 |          0 |
-|   u_xoodyak      |         xoodyakcore |       2240 |       2240 |       0 |    0 | 1572 |      0 |      0 |          0 |
-|     (u_xoodyak)  |         xoodyakcore |        140 |        140 |       0 |    0 | 1180 |      0 |      0 |          0 |
-|     u_xoodoo     |              xoodoo |       2102 |       2102 |       0 |    0 |  392 |      0 |      0 |          0 |
-|   uart_inst      |          simpleuart |         94 |         94 |       0 |    0 |  131 |      0 |      0 |          0 |
-+------------------+---------------------+------------+------------+---------+------+------+--------+--------+------------+
++-------------------+----------------------+------------+------------+---------+------+------+--------+--------+------------+
+|      Instance     |        Module        | Total LUTs | Logic LUTs | LUTRAMs | SRLs |  FFs | RAMB36 | RAMB18 | DSP Blocks |
++-------------------+----------------------+------------+------------+---------+------+------+--------+--------+------------+
+| system            |                (top) |       4804 |       4760 |      44 |    0 | 4132 |      5 |      0 |          0 |
+|   (system)        |                (top) |          7 |          7 |       0 |    0 |  133 |      5 |      0 |          0 |
+|   cpu             |         picorv32_axi |       1000 |        956 |      44 |    0 |  579 |      0 |      0 |          0 |
+|     (cpu)         |         picorv32_axi |         11 |         11 |       0 |    0 |    0 |      0 |      0 |          0 |
+|     axi_adapter   | picorv32_axi_adapter |          1 |          1 |       0 |    0 |    4 |      0 |      0 |          0 |
+|     picorv32_core |             picorv32 |        988 |        944 |      44 |    0 |  575 |      0 |      0 |          0 |
+|   u_aead          |    aead_mmap_wrapper |       3307 |       3307 |       0 |    0 | 3016 |      0 |      0 |          0 |
+|     (u_aead)      |    aead_mmap_wrapper |          1 |          1 |       0 |    0 |    0 |      0 |      0 |          0 |
+|     u_cluster     |       crypto_cluster |       3306 |       3306 |       0 |    0 | 3016 |      0 |      0 |          0 |
+|       (u_cluster) |       crypto_cluster |        209 |        209 |       0 |    0 |  840 |      0 |      0 |          0 |
+|       u_cofb      |            cofb_core |       1444 |       1444 |       0 |    0 |  997 |      0 |      0 |          0 |
+|       u_tinyjambu |       tinyjambu_core |        372 |        372 |       0 |    0 |  506 |      0 |      0 |          0 |
+|       u_xoodyak   |          xoodyakcore |       1282 |       1282 |       0 |    0 |  673 |      0 |      0 |          0 |
+|   u_bridge        |    axi_to_apb_bridge |        343 |        343 |       0 |    0 |  227 |      0 |      0 |          0 |
+|   u_sdspi         |    simple_spi_master |         57 |         57 |       0 |    0 |   46 |      0 |      0 |          0 |
+|   uart_inst       |           simpleuart |         93 |         93 |       0 |    0 |  131 |      0 |      0 |          0 |
++-------------------+----------------------+------------+------------+---------+------+------+--------+--------+------------+
 * Note: The sum of lower-level cells may be larger than their parent cells total, due to cross-hierarchy LUT combining
 
 

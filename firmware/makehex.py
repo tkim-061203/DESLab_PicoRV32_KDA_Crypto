@@ -15,7 +15,7 @@ def bin_to_hex(bin_path, nwords=None):
 
     total_words = len(bindata) // 4
 
-    # Nếu có nwords (cách dùng cũ): kiểm tra kích thước như file gốc
+    # If nwords is provided (legacy mode): verify size against original constraint
     if nwords is not None:
         assert len(bindata) <= 4 * nwords, \
             f"Binary ({len(bindata)} bytes) exceeds {4*nwords} bytes ({nwords} words)!"

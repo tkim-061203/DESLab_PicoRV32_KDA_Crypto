@@ -1,7 +1,6 @@
 // ============================================================
 // GIFT-128 PermBits (FULL UNROLLED, NO LOOP)
 // ============================================================
-`timescale 1ns / 1ps
 module gift128_permbits (
     input  wire [31:0] s0,
     input  wire [31:0] s1,

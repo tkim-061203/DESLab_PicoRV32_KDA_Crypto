@@ -1,0 +1,14 @@
+========================================================
+              HARDWARE THROUGHPUT REPORT                
+========================================================
+
+Core / Scope    | Payload  | Ops   | Core Cyc   | Total Cyc  | HW Throughput   | System Throughput
+-----------------------------------------------------------------------------------------------
+TinyJAMBU       | 56     B | 4     | 1396       | 3504       | 32.092 Mbps     | 12.785 Mbps    
+Xoodyak         | 60     B | 4     | 254        | 2656       | 231.419 Mbps    | 18.072 Mbps    
+GIFT-COFB       | 66     B | 4     | 1608       | 4343       | 44.693 Mbps     | 12.157 Mbps    
+System-All      | 182    B | 12    | 3258       | 10503      | N/A             | 13.863 Mbps    
+
+========================================================
+Note: 'HW Throughput' assumes the core is running at its maximum frequency (Fmax).
+      'System Throughput' assumes the entire SoC runs at the nominal 100 MHz clock.

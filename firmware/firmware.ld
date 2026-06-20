@@ -11,7 +11,7 @@
 
 MEMORY
 {
-    APP_RAM (rwx) : ORIGIN = 0x00010000, LENGTH = 64K
+    APP_RAM (rwx) : ORIGIN = 0x00010000, LENGTH = 16K
 }
 
 ENTRY(app_entry)
@@ -50,6 +50,6 @@ SECTIONS
 
     _stack_top = ORIGIN(APP_RAM) + LENGTH(APP_RAM);
 
-    ASSERT(. <= _stack_top - 0x1000,
-        "ERROR: application too large – does not fit in 64 KB App BRAM!")
+    ASSERT(. <= _stack_top - 0x800,
+        "ERROR: application too large – does not fit in 16 KB App BRAM!")
 }
