@@ -1,6 +1,6 @@
 # PicoSoC with Lightweight Cryptographic Accelerators
 
-This repository provides a complete System-on-Chip (SoC) based on the **PicoRV32** RISC-V CPU, featuring high-speed hardware accelerators for **TinyJAMBU**, **Xoodyak**, and **GIFT-COFB**. The design is optimized for area-constrained ASIC implementations using the **OpenLane2** flow.
+This repository provides a complete System-on-Chip (SoC) based on the **PicoRV32** RISC-V CPU, featuring high-speed hardware accelerators for **TinyJAMBU**, **Xoodyak**, and **GIFT-COFB** integrated under a unified register map interface. The design is optimized for area-constrained ASIC implementations using the **OpenLane2** physical design flow.
 
 ---
 
@@ -11,13 +11,13 @@ The project extends the standard PicoSoC architecture by integrating a dedicated
 ### Key Components
 
 - **CPU**: PicoRV32 (RV32I) - A size-optimized RISC-V implementation.
-- **Interconnect**: Unified memory-mapped interface (Valid-Ready protocol).
-- **Memory**: 4 KB Boot BRAM, 64 KB Application BRAM.
+- **Interconnect**: AXI4-Lite system bus bridged to an APB peripheral bus.
+- **Memory**: 4 KB Boot BRAM (preloaded with bootloader) and 16 KB Application BRAM (on AXI).
 - **Crypto Accelerators**:
-  - **TinyJAMBU**: AEAD (Authenticated Encryption with Associated Data).
+  - **TinyJAMBU-128**: Lightweight AEAD (Authenticated Encryption with Associated Data) accelerator.
   - **Xoodyak**: Area-optimized Keyed-only AEAD (Hash mode removed for ASIC efficiency).
-  - **GIFT-COFB**: NIST Lightweight Cryptography (LWC) finalist algorithm.
-- **Peripherals**: 115200 Baud UART, SD Card SPI Master, GPIO.
+  - **GIFT-COFB**: Block-cipher-based NIST Lightweight Cryptography (LWC) finalist algorithm.
+- **Peripherals**: 115200 Baud UART, SD Card SPI Master, GPIO / Output LED register, Input Pin registers (switches & buttons).
 
 ---
 
@@ -25,118 +25,170 @@ The project extends the standard PicoSoC architecture by integrating a dedicated
 
 ### Memory Map
 
-The system uses a 32-bit address space. All crypto cores are memory-mapped for easy software interaction.
+The system uses a 32-bit address space. All peripherals and memories are memory-mapped to make software interactions straightforward.
 
-| Base Address | Peripheral | Description |
+| Address Range | Peripheral | Description |
 | :--- | :--- | :--- |
-| `0x0000_0000` | **Boot ROM** | 4 KB Bootloader (Software pre-loaded) |
-| `0x0001_0000` | **Main RAM** | 64 KB Application Memory |
-| `0x1000_0000` | **GPIO/UART** | Control register at `0x00`, UART at `0x04-0x10` |
-| `0x3000_0000` | **TinyJAMBU** | AEAD Accelerator |
-| `0x4000_0000` | **Xoodyak** | AEAD Accelerator (Optimized) |
-| `0x5000_0000` | **GIFT-COFB** | AEAD Accelerator |
-| `0x6000_0000` | **SD Master** | SPI Interface for secondary storage |
+| `0x0000_0000` - `0x0000_0FFF` | **Boot ROM** | 4 KB Bootloader BRAM (Software pre-loaded) |
+| `0x0001_0000` - `0x0001_3FFF` | **Main RAM** | 16 KB Application Memory BRAM (Read/Write, AXI) |
+| `0x1000_0000` | **LED Output** | `out_byte` output register (Write-only) |
+| `0x1000_0004` - `0x1000_0010` | **UART** | TX Data (`0x04`), RX Data (`0x08`), Status (`0x0C`), Baud Divider (`0x10`) |
+| `0x2000_0000` - `0x2000_0004` | **Board Inputs** | Board Switches (`0x00`), Board Buttons (`0x04`) (Read-only) |
+| `0x3000_0000` - `0x3000_00B7` | **AEAD Cluster** | Unified AEAD Accelerator Wrapper (TinyJAMBU, Xoodyak, GIFT-COFB) |
+| `0x6000_0000` - `0x6000_000C` | **SD SPI Master**| SPI Interface for SD card raw sector reads |
 
 ---
 
 ## 3. Cryptographic Hardware Accelerators
 
-### TinyJAMBU AEAD
+All three crypto cores are managed by a unified registers and multiplexer interface inside `crypto_cluster.v` mapped at `0x3000_0000`.
 
-TinyJAMBU is a lightweight permutation-based AEAD. The hardware implementation supports high-frequency operation and provides a simple interface for Key, Nonce, and Data processing.
+### Register Map (`AEAD_BASE = 0x3000_0000`)
 
-- **Data Width**: 128-bit Key, 96-bit Nonce.
-- **Control**: `JB_CTRL` defines AD and Message lengths for automatic processing.
+| Offset | Register Name | Description |
+| :--- | :--- | :--- |
+| `0x00` | `AEAD_CTRL` | Control / Status register:<br>- `[1:0]` Algorithm Select (`00`=TinyJAMBU, `01`=Xoodyak, `10`=GIFT-COFB)<br>- `[2]` Start Pulse (write `1` to trigger, auto-clears)<br>- `[3]` Decrypt Mode (`0`=Encrypt, `1`=Decrypt)<br>- `[6]` Done sticky bit (read-only)<br>- `[7]` Valid sticky bit (read-only) |
+| `0x04` - `0x10` | `AEAD_KEY[0:3]` | 128-bit Key registers (4 words) |
+| `0x14` - `0x20` | `AEAD_NONCE[0:3]`| 128-bit Nonce registers (4 words, TinyJAMBU uses 96-bit `[95:0]`) |
+| `0x24` - `0x30` | `AEAD_AD[0:3]` | 128-bit Associated Data input registers |
+| `0x34` - `0x40` | `AEAD_DIN[0:3]` | 128-bit Plaintext / Ciphertext input registers |
+| `0x44` - `0x50` | `AEAD_TAGIN[0:3]`| 128-bit Input Tag registers (TinyJAMBU uses 64-bit `[63:0]`) |
+| `0x54` | `AEAD_AD_LEN` | 8-bit Associated Data length (bytes) |
+| `0x58` | `AEAD_DAT_LEN` | 8-bit Data / Plaintext length (bytes) |
+| `0x5C` | `AEAD_MSG_LEN` | 8-bit Message / Ciphertext length (bytes) |
+| `0x60` | `AEAD_STREAM_STATUS`| GIFT-COFB streaming/handshake status:<br>- `[4]` GIFT valid<br>- `[3]` GIFT done<br>- `[2]` GIFT AD request<br>- `[1]` GIFT Message request<br>- `[0]` GIFT data valid sticky |
+| `0x64` | `AEAD_STREAM_CTRL` | GIFT-COFB streaming control:<br>- `[2]` Clear data valid sticky<br>- `[1]` AD ack pulse<br>- `[0]` Message ack pulse |
+| `0x80` - `0x8C` | `AEAD_DOUT[0:3]` | 128-bit Output Data registers |
+| `0x90` - `0x9C` | `AEAD_TAGOUT[0:3]`| 128-bit Output Tag registers |
+| `0xA0` | `AEAD_MEAS_STATUS`| Performance measurement status (read-only) |
+| `0xA4` | `AEAD_MEAS_CURR` | Current operation hardware cycle count |
+| `0xA8` | `AEAD_MEAS_LAST` | Last operation hardware cycle count |
+| `0xAC` | `AEAD_MEAS_TJ_LAST`| Last TinyJAMBU operation hardware cycle count |
+| `0xB0` | `AEAD_MEAS_XD_LAST`| Last Xoodyak operation hardware cycle count |
+| `0xB4` | `AEAD_MEAS_GF_LAST`| Last GIFT-COFB operation hardware cycle count |
 
-### Xoodyak (Optimized Keyed-Only)
+### Algorithm Details
 
-The Xoodyak core has been significantly modified for ASIC area reduction:
-
-- **Optimization**: All Hash-related state and logic were removed. Only the **Keyed AEAD** mode is supported.
-- **Interface**: Improved 2-bit `sel_type` control:
-  - `0x01` (binary `01`): Encrypt
-  - `0x02` (binary `10`): Decrypt
-- **Control Register (`XD_CTRL`)**:
-  - `[17:16]`: Mode Selector
-  - `[12:8]`: Associated Data Length (0-16 bytes)
-  - `[4:0]`: Message/Data Length (0-16 bytes)
-
-### GIFT-COFB
-
-A block-cipher based AEAD finalist in the NIST LWC competition.
-
-- **Block Size**: 128-bit.
-- **Interface**: Uses an ACK/REQ handshake mechanism to ensure data is processed correctly within the GIFT permutation cycles.
+- **TinyJAMBU-128**:
+  - Simple 128-bit Key, 96-bit Nonce, up to 16B AD, and up to 16B data processing per operation.
+  - Done and Valid sticky flags are automatically managed and asserted upon completion.
+- **Xoodyak (Optimized Keyed-Only)**:
+  - All Hash-related state and logic were stripped to maximize ASIC area efficiency. Only the **Keyed AEAD** mode is supported.
+  - Automatically runs and asserts `done` and `valid` flags in `AEAD_CTRL`.
+- **GIFT-COFB**:
+  - A block-cipher-based LWC algorithm supporting multi-block processing.
+  - Employs an ACK/REQ handshake mechanism (via `AEAD_STREAM_STATUS` and `AEAD_STREAM_CTRL`) to stream additional AD and Message blocks dynamically within the permutation cycles.
 
 ---
 
 ## 4. Software Development Stack
 
-### Firmware Implementation
+### Firmware HAL Implementation
 
-The system firmware (`scripts/vivado/firmware.c`) provides a hardware abstraction layer (HAL) for the accelerators.
-
-Example usage for Xoodyak:
+The system firmware provides a hardware abstraction layer (HAL) for the unified AEAD wrapper. Below is an example of performing a Xoodyak encryption:
 
 ```c
-// Setup Key and Nonce
-XD(0x00) = key_low; ... XD(0x0C) = key_high;
-XD(0x10) = nonce_low; ... XD(0x1C) = nonce_high;
+#define AEAD_BASE 0x30000000
+#define AEAD_REG(off) (*(volatile uint32_t *)(AEAD_BASE + (off)))
+#define AEAD_CTRL      AEAD_REG(0x00)
+#define AEAD_KEY(i)    AEAD_REG(0x04 + (i) * 4)
+#define AEAD_NONCE(i)  AEAD_REG(0x14 + (i) * 4)
+#define AEAD_AD(i)     AEAD_REG(0x24 + (i) * 4)
+#define AEAD_DIN(i)    AEAD_REG(0x34 + (i) * 4)
+#define AEAD_DOUT(i)   AEAD_REG(0x80 + (i) * 4)
+#define AEAD_TAGOUT(i) AEAD_REG(0x90 + (i) * 4)
+#define AEAD_AD_LEN    AEAD_REG(0x54)
+#define AEAD_DAT_LEN   AEAD_REG(0x58)
 
-// Process 9B AD and 14B Data
-XD_CTRL = (1u << 16) | (9u << 8) | 14u;
-while (!(XD_STATUS & 0x02)); // Wait for Done bit
+// 1. Load Key and Nonce
+for (int i = 0; i < 4; i++) {
+    AEAD_KEY(i) = key[i];
+    AEAD_NONCE(i) = nonce[i];
+}
+
+// 2. Load Associated Data and Plaintext
+AEAD_AD(0) = ad[0]; // etc.
+AEAD_DIN(0) = pt[0]; // etc.
+AEAD_AD_LEN = 9;   // 9 Bytes of AD
+AEAD_DAT_LEN = 14; // 14 Bytes of Plaintext
+
+// 3. Trigger Encryption (alg_sel = 1 for Xoodyak, start = 1, decrypt = 0)
+AEAD_CTRL = (0u << 3) | (1u << 2) | 1u;
+
+// 4. Wait for Done flag in AEAD_CTRL[6]
+while (!(AEAD_CTRL & 0x40));
+
+// 5. Read Ciphertext and Tag outputs
+for (int i = 0; i < 4; i++) {
+    ct[i] = AEAD_DOUT(i);
+    tag[i] = AEAD_TAGOUT(i);
+}
 ```
 
 ### Simulation Flow
 
-The project uses **Icarus Verilog** for high-speed functional verification.
+Functional verification uses **Icarus Verilog** and **vvp**:
 
 ```bash
 cd scripts/vivado/
 make sim_system
 ```
 
-This command performs the following:
+This simulation command:
+1. Compiles the RISC-V application firmware (`firmware.c`) using `riscv64-unknown-elf-gcc`.
+2. Converts the compiled ELF binary to a `.hex` file.
+3. Compiles the top-level SoC simulation target with all crypto cores using Icarus Verilog.
+4. Executes the simulation with `vvp` to output functional status and performance metrics.
 
-1. Compiles the RISC-V firmware using `riscv64-unknown-elf-gcc`.
-2. Converts the binary to a `.hex` file.
-3. Runs the top-level SoC simulation.
+To build just the bare-metal application firmware:
+```bash
+cd firmware/
+make firmware
+```
 
 ---
 
 ## 5. ASIC Flow (OpenLane2)
 
-The repository is structured to support a complete digital backend flow.
+The repository supports a complete digital backend physical design flow.
 
 ### Directory Structure
 
-- `openlane/designs/picosoc/`: Design-specific files.
+- `openlane/designs/picosoc/`: Design-specific configuration files.
 - `openlane/designs/picosoc/src/`: Synchronized RTL source files.
-- `openlane/sw/`: ASIC-ready firmware binaries.
 
-### Synthesis Configuration
+### Synthesis and Physical Design Configuration
 
-The `config.json` file is tuned for the SkyWater 130nm process (sky130):
+The configuration files under `openlane/` target the SkyWater 130nm process (`sky130`):
 
 - **Clock**: Target 10ns (100 MHz).
-- **Core Area**: Optimized for high utilization.
-- **Pin Mapping**: GPIO, UART, and SPI pins are mapped to standard chip I/Os.
+- **Blackboxed Macros**: Core components like the 16 KB SRAM macro (`sky130_sram_4kbyte_1rw_32x1024_8`), the PicoRV32 AXI core (`picorv32_axi`), and the AEAD cluster (`crypto_cluster`) are handled as blackboxed macros.
+- **Connectivity & IR Drop Overrides**: Due to blackboxed macros containing internal unconnected power routing, node connectivity checks and IR drop checks are bypassed in `config.json`:
+  ```json
+  "RUN_IR_DROP_REPORT": false,
+  "FP_PDN_CHECK_NODES": false,
+  "VSRC_LOC_FILES": ""
+  ```
+- **Re-running Flow**:
+  ```bash
+  cd openlane/
+  python3 -m openlane.main --design designs/picosoc --flow
+  ```
 
 ---
 
 ## 6. Files in the Repository
 
 - `picorv32.v`: The base RISC-V core.
-- `picosoc/`: Hardware modules (Wrappers and Crypto RTL).
-- `scripts/vivado/`: Standard simulation and FPGA scripts.
-- `openlane/`: ASIC flow and synchronized releases.
-- `README.md`: This document.
+- `picosoc/`: SoC wrapper hardware modules, SPI master, and Crypto RTL cores.
+- `firmware/`: Bootloader and application source files.
+- `scripts/vivado/`: Standard simulation, testbench, and timing/utilization reports.
+- `openlane/`: ASIC flow configurations and physical design outputs.
+- `README.md`: This project documentation.
 
 ---
 
 ## 7. Credits and License
 
-- **PicoRV32**: Clifford Wolf (ISC License).
-- **PicoSoC**: Clifford Wolf (ISC License).
-- **Crypto Accelerators**: Integrated and optimized for this project.
+- **PicoRV32 / PicoSoC**: Claire Xenia Wolf (ISC License).
+- **Crypto Accelerators**: Integrated, wrapped under a unified memory interface, and optimized for ASIC area efficiency.
